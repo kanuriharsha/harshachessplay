@@ -85,6 +85,13 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
 
     const piece = game.get(square as Square);
     
+    // If clicking on the already selected piece, deselect it
+    if (selectedSquare === square) {
+      setSelectedSquare(null);
+      setLegalMoves([]);
+      return;
+    }
+    
     // If we have a selected piece and click on a legal move square
     if (selectedSquare && legalMoves.includes(square)) {
       // Determine if this move captures using verbose moves (handles en-passant/promotions)
