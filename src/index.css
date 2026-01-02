@@ -1,0 +1,129 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Chess Training Platform Design System */
+
+@layer base {
+  :root {
+    /* Chess.com Board Colors (converted to HSL) */
+    --board-light: 60 47% 88%;
+    --board-dark: 93 28% 47%;
+    --board-highlight: 51 100% 70%;
+    --board-legal-move: 120 40% 50%;
+    
+    /* Main Theme */
+    --background: 40 20% 96%;
+    --foreground: 220 15% 20%;
+
+    --card: 40 25% 98%;
+    --card-foreground: 220 15% 20%;
+
+    --popover: 40 25% 98%;
+    --popover-foreground: 220 15% 20%;
+
+    --primary: 93 28% 35%;
+    --primary-foreground: 60 47% 95%;
+
+    --secondary: 40 15% 90%;
+    --secondary-foreground: 220 15% 25%;
+
+    --muted: 40 10% 92%;
+    --muted-foreground: 220 10% 45%;
+
+    --accent: 93 35% 45%;
+    --accent-foreground: 60 47% 95%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 40 15% 85%;
+    --input: 40 15% 85%;
+    --ring: 93 28% 47%;
+
+    --radius: 0.75rem;
+
+    /* Piece colors */
+    --piece-white: 45 30% 92%;
+    --piece-black: 220 10% 25%;
+    
+    /* Shadows */
+    --shadow-piece: 0 4px 8px -2px hsl(220 15% 20% / 0.15);
+    --shadow-board: 0 20px 60px -15px hsl(220 15% 20% / 0.2);
+    --shadow-card: 0 4px 20px -4px hsl(220 15% 20% / 0.08);
+
+    --sidebar-background: 40 20% 97%;
+    --sidebar-foreground: 220 15% 25%;
+    --sidebar-primary: 93 28% 35%;
+    --sidebar-primary-foreground: 60 47% 95%;
+    --sidebar-accent: 40 15% 92%;
+    --sidebar-accent-foreground: 220 15% 25%;
+    --sidebar-border: 40 15% 88%;
+    --sidebar-ring: 93 28% 47%;
+  }
+
+  .dark {
+    --background: 220 20% 10%;
+    --foreground: 40 20% 95%;
+
+    --card: 220 18% 13%;
+    --card-foreground: 40 20% 95%;
+
+    --popover: 220 18% 13%;
+    --popover-foreground: 40 20% 95%;
+
+    --primary: 93 35% 50%;
+    --primary-foreground: 220 20% 10%;
+
+    --secondary: 220 15% 18%;
+    --secondary-foreground: 40 20% 90%;
+
+    --muted: 220 15% 18%;
+    --muted-foreground: 40 10% 60%;
+
+    --accent: 93 30% 40%;
+    --accent-foreground: 40 20% 95%;
+
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 15% 20%;
+    --input: 220 15% 20%;
+    --ring: 93 35% 50%;
+
+    --sidebar-background: 220 18% 12%;
+    --sidebar-foreground: 40 20% 90%;
+    --sidebar-primary: 93 35% 50%;
+    --sidebar-primary-foreground: 220 20% 10%;
+    --sidebar-accent: 220 15% 18%;
+    --sidebar-accent-foreground: 40 20% 90%;
+    --sidebar-border: 220 15% 18%;
+    --sidebar-ring: 93 35% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'DM Sans', system-ui, sans-serif;
+  }
+}
+
+@layer utilities {
+  .board-shadow {
+    box-shadow: var(--shadow-board);
+  }
+  
+  .piece-shadow {
+    filter: drop-shadow(0 3px 4px hsl(220 15% 20% / 0.2));
+  }
+  
+  .card-shadow {
+    box-shadow: var(--shadow-card);
+  }
+}
