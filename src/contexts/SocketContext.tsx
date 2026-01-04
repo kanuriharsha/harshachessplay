@@ -7,7 +7,7 @@ interface SocketContextType {
   respondDraw: (sessionId: string, accepted: boolean) => void;
   sendMove: (payload: any) => void;
   sendUndo: (payload: any) => void;
-  joinSession: (sessionId: string) => void;
+  joinSession: (sessionId: string, isSpectator?: boolean) => void;
   sendResign: (sessionId: string, resignerRole: string) => void;
   sendGameEnded?: (payload: any) => void;
 }
@@ -92,7 +92,13 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       window.dispatchEvent(new CustomEvent('app:game-ended', { detail: data }));
     });
 
+    socket.on('play-request-received', (data: any) => {
+      window.dispatchEvent(new CustomEvent('app:play-request-received', { detail: data }));
+    });
 
+    socket.on('play-request-rejected', (data: any) => {
+      window.dispatchEvent(new CustomEvent('app:play-request-rejected', { detail: data }));
+    });
 
     socket.on('connect_error', (err: any) => {
       console.error('Socket connect_error', err);
@@ -120,15 +126,21 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     socketRef.current?.emit('undo', payload);
   };
 
-  const joinSession = (sessionId: string) => {
-    socketRef.current?.emit('join-session', { sessionId, role });
-    console.log('SocketProvider: joinSession emitted', sessionId, 'role=', role);
+  const joinSession = (sessionId: string, isSpectator = false) => {
+    socketRef.current?.emit('join-session', { sessionId, role, isSpectator });
+    console.log('SocketProvider: joinSession emitted', sessionId, 'role=', role, 'isSpectator=', isSpectator);
   };
 
 
 
   const sendResign = (sessionId: string, resignerRole: string) => {
-    socketRef.current?.emit('resign', { sessionId, resignerRole });
+    // support either (sessionId, resignerRole) or single object { sessionId, resignerRole }
+    if (!socketRef.current) return;
+    if (typeof sessionId === 'object' && sessionId !== null) {
+      socketRef.current?.emit('resign', sessionId);
+    } else {
+      socketRef.current?.emit('resign', { sessionId, resignerRole });
+    }
   };
 
   const sendGameEnded = (payload: any) => {

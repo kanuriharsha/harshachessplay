@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Chess } from 'chess.js';
 import { useAuth } from '@/contexts/AuthContext';
 import { ChessBoard } from '@/components/chess/ChessBoard';
@@ -37,9 +37,13 @@ const Game: React.FC = () => {
   const [remoteLastMove, setRemoteLastMove] = useState<{ from: string; to: string } | null>(null);
   const [adminTime, setAdminTime] = useState(600000);
   const [studentTime, setStudentTime] = useState(600000);
+  const [player1Time, setPlayer1Time] = useState(600000);
+  const [player2Time, setPlayer2Time] = useState(600000);
   const [prevFen, setPrevFen] = useState<string | null>(null);
   const [gameStatus, setGameStatus] = useState('');
   const [loading, setLoading] = useState(true);
+  const location = useLocation();
+  const [isSpectator, setIsSpectator] = useState(false);
   const [gameResult, setGameResult] = useState<'win' | 'lose' | 'draw' | null>(null);
   const [showDrawRequest, setShowDrawRequest] = useState(false);
   
@@ -50,18 +54,32 @@ const Game: React.FC = () => {
   // Fetch active session
   const fetchSession = useCallback(async () => {
     if (!user) return;
+    // If admin navigated to /game?spectate=SESSION_ID, fetch that session by id
+    const params = new URLSearchParams(location.search);
+    const spectateId = params.get('spectate');
 
     try {
       const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
-      const res = await fetch(`${API}/sessions/active?userId=${user.id}`);
-      if (!res.ok) {
-        toast.error('No active game found');
-        navigate(role === 'admin' ? '/admin' : '/student');
-        return;
+      let res;
+      let body;
+      let sessionData: GameSession | null = null;
+      if (spectateId) {
+        // Admin requested spectate of specific session
+        res = await fetch(`${API}/sessions/${spectateId}`);
+        if (res.ok) {
+          body = await res.json();
+          sessionData = body.session as GameSession | null;
+          setIsSpectator(true);
+        }
+      } else {
+        res = await fetch(`${API}/sessions/active?userId=${user.id}`);
+        if (res.ok) {
+          body = await res.json();
+          sessionData = body.session as GameSession | null;
+        }
       }
-      const body = await res.json();
-      const sessionData = body.session as GameSession | null;
-      if (!sessionData) {
+
+      if (!res || !res.ok || !sessionData) {
         toast.error('No active game found');
         navigate(role === 'admin' ? '/admin' : '/student');
         return;
@@ -71,6 +89,8 @@ const Game: React.FC = () => {
       setGame(new Chess(sessionData.fen ?? undefined));
       setAdminTime(sessionData.adminTimeMs ?? 600000);
       setStudentTime(sessionData.studentTimeMs ?? 600000);
+      setPlayer1Time(sessionData.player1TimeMs ?? 600000);
+      setPlayer2Time(sessionData.player2TimeMs ?? 600000);
       setLoading(false);
     } catch (err) {
       console.error(err);
@@ -91,12 +111,12 @@ const Game: React.FC = () => {
   useEffect(() => {
     if (session?._id) {
       try {
-        socket.joinSession(session._id);
+        socket.joinSession(session._id, isSpectator);
       } catch (err) {
         console.error('Failed to join session via socket', err);
       }
     }
-  }, [session?._id, socket]);
+  }, [session?._id, socket, isSpectator]);
 
   // Global socket events are dispatched as window events by SocketProvider
   useEffect(() => {
@@ -141,6 +161,8 @@ const Game: React.FC = () => {
       }
       if (typeof data.adminTimeMs === 'number') setAdminTime(data.adminTimeMs);
       if (typeof data.studentTimeMs === 'number') setStudentTime(data.studentTimeMs);
+      if (typeof data.player1TimeMs === 'number') setPlayer1Time(data.player1TimeMs);
+      if (typeof data.player2TimeMs === 'number') setPlayer2Time(data.player2TimeMs);
       setRemoteLastMove(data.lastMove ?? null);
 
       // If the sender marked this move as check, notify both players
@@ -153,28 +175,45 @@ const Game: React.FC = () => {
 
     const onDrawDeclined = () => toast.info('Opponent declined the draw');
 
+    const endHandledRef = (window as any).__endHandledRef || { current: {} };
+    (window as any).__endHandledRef = endHandledRef;
+
     const onGameEnded = (e: any) => {
       const data = e.detail;
+      if (!data || !data.sessionId) return;
+      // prevent duplicate handling for same session
+      if (endHandledRef.current[data.sessionId]) return;
+      endHandledRef.current[data.sessionId] = true;
+
       if (timerRef.current) clearInterval(timerRef.current);
-      if (!data) return;
+
+      // Determine didIWin using authoritative payload fields
+      const winnerId = data.winnerId || null;
+      const player1Id = data.player1Id || data.player1Id;
+      const player2Id = data.player2Id || data.player2Id;
+      const adminId = data.adminId || data.adminId;
+      const studentId = data.studentId || data.studentId;
+
+      let didIWin = false;
+      if (winnerId) {
+        didIWin = winnerId === user?.id;
+      } else if (data.winner) {
+        // winner may be a role string
+        if (data.winner === 'admin' && adminId) didIWin = adminId === user?.id;
+        else if (data.winner === 'student' && studentId) didIWin = studentId === user?.id;
+        else if (data.winner === 'player1' && player1Id) didIWin = player1Id === user?.id;
+        else if (data.winner === 'player2' && player2Id) didIWin = player2Id === user?.id;
+        else didIWin = false;
+      }
+
       if (data.result === 'draw') {
         setGameResult('draw');
         setGameStatus('Game drawn');
-      } else if (data.result === 'resign') {
-        const didIWin = data.winner === role;
-        setGameResult(didIWin ? 'win' : 'lose');
-        setGameStatus(didIWin ? 'You won by resignation!' : 'Opponent won by resignation');
       } else {
-        // Generic handling for checkmate, opponent-left, or explicit winner
-        if (data.winner) {
-          const didIWin = data.winner === role;
-          setGameResult(didIWin ? 'win' : 'lose');
-          setGameStatus(didIWin ? 'You won!' : 'You lost!');
-        } else {
-          // fallback
-          setGameResult('lose');
-          setGameStatus('Game ended');
-        }
+        setGameResult(didIWin ? 'win' : 'lose');
+        if (data.result === 'timeout') setGameStatus(didIWin ? 'You won on time!' : 'You lost on time!');
+        else if (data.result === 'resign') setGameStatus(didIWin ? 'You won by resignation!' : 'Opponent won by resignation');
+        else setGameStatus(didIWin ? 'You won!' : 'You lost!');
       }
     };
 
@@ -215,18 +254,34 @@ const Game: React.FC = () => {
             if (typeof updated.studentTimeMs === 'number') {
               setStudentTime((prev) => Math.min(prev, updated.studentTimeMs));
             }
-
+            if (typeof updated.player1TimeMs === 'number') {
+              setPlayer1Time((prev) => Math.min(prev, updated.player1TimeMs));
+            }
+            if (typeof updated.player2TimeMs === 'number') {
+              setPlayer2Time((prev) => Math.min(prev, updated.player2TimeMs));
+            }
+            
             if (updated.status === 'completed') {
               if (updated.winner === 'draw') {
                 setGameStatus('Game drawn!');
                 toast.info('Game ended in a draw');
               } else {
-                const winnerText = updated.winner === 'admin' ? 'Coach' : 'Student';
+                // Determine winner text for admin-student or student-student
+                let winnerText = 'Opponent';
+                if (updated.winner === 'admin') winnerText = 'Coach';
+                else if (updated.winner === 'student') winnerText = 'Student';
+                else if (updated.winner === 'player1') winnerText = updated.player1Name || 'Player 1';
+                else if (updated.winner === 'player2') winnerText = updated.player2Name || 'Player 2';
+                else if (updated.winnerId) winnerText = (updated.winnerId === updated.player1Id ? (updated.player1Name || 'Player 1') : (updated.player2Name || 'Player 2'));
                 setGameStatus(`${winnerText} wins!`);
                 toast.success(`${winnerText} wins!`);
               }
             } else if (updated.status === 'timeout') {
-              const winnerText = updated.winner === 'admin' ? 'Coach' : 'Student';
+              let winnerText = 'Opponent';
+              if (updated.winner === 'admin') winnerText = 'Coach';
+              else if (updated.winner === 'student') winnerText = 'Student';
+              else if (updated.winner === 'player1') winnerText = updated.player1Name || 'Player 1';
+              else if (updated.winner === 'player2') winnerText = updated.player2Name || 'Player 2';
               setGameStatus(`${winnerText} wins on time!`);
               toast.info(`${winnerText} wins on time!`);
             }
@@ -249,7 +304,9 @@ const Game: React.FC = () => {
       return;
     }
 
-    const adminIsWhite = session.adminIsWhite !== false; // default true
+    // Decide which time pair to tick depending on session type
+    const isStudentVsStudent = !!(session.player1Id && session.player2Id);
+    const whiteIsPlayer1 = isStudentVsStudent ? (session.player1IsWhite !== false) : (session.adminIsWhite !== false);
     lastTickRef.current = Date.now();
 
     timerRef.current = setInterval(() => {
@@ -257,29 +314,48 @@ const Game: React.FC = () => {
       const delta = now - lastTickRef.current;
       lastTickRef.current = now;
 
-      // Get current turn from the game state (not captured closure)
       const currentTurn = game.turn(); // 'w' or 'b'
       const isWhiteTurn = currentTurn === 'w';
-      const isAdminTurn = (adminIsWhite && isWhiteTurn) || (!adminIsWhite && !isWhiteTurn);
 
-      if (isAdminTurn) {
-        // It's admin's turn - decrement admin time
-        setAdminTime((prev) => {
-          const newTime = Math.max(0, prev - delta);
-          if (newTime === 0 && prev > 0) {
-            handleTimeout('student');
-          }
-          return newTime;
-        });
+      if (isStudentVsStudent) {
+        const isPlayer1Turn = whiteIsPlayer1 ? isWhiteTurn : !isWhiteTurn;
+        if (isPlayer1Turn) {
+          setPlayer1Time((prev) => {
+            const newTime = Math.max(0, prev - delta);
+            if (newTime === 0 && prev > 0) {
+              // player2 wins
+              handleTimeout('player2' as any);
+            }
+            return newTime;
+          });
+        } else {
+          setPlayer2Time((prev) => {
+            const newTime = Math.max(0, prev - delta);
+            if (newTime === 0 && prev > 0) {
+              handleTimeout('player1' as any);
+            }
+            return newTime;
+          });
+        }
       } else {
-        // It's student's turn - decrement student time
-        setStudentTime((prev) => {
-          const newTime = Math.max(0, prev - delta);
-          if (newTime === 0 && prev > 0) {
-            handleTimeout('admin');
-          }
-          return newTime;
-        });
+        const isAdminTurn = (whiteIsPlayer1 && isWhiteTurn) || (!whiteIsPlayer1 && !isWhiteTurn);
+        if (isAdminTurn) {
+          setAdminTime((prev) => {
+            const newTime = Math.max(0, prev - delta);
+            if (newTime === 0 && prev > 0) {
+              handleTimeout('student');
+            }
+            return newTime;
+          });
+        } else {
+          setStudentTime((prev) => {
+            const newTime = Math.max(0, prev - delta);
+            if (newTime === 0 && prev > 0) {
+              handleTimeout('admin');
+            }
+            return newTime;
+          });
+        }
       }
     }, 100);
 
@@ -290,7 +366,7 @@ const Game: React.FC = () => {
     };
   }, [session?.status, game]);
 
-  const handleTimeout = async (winner: 'admin' | 'student') => {
+  const handleTimeout = async (winner: string) => {
     if (!session) return;
     
     // Clear the timer
@@ -298,15 +374,6 @@ const Game: React.FC = () => {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
-
-    // Update local state immediately
-    const didIWin = winner === role;
-    setGameResult(didIWin ? 'win' : 'lose');
-    setGameStatus(didIWin ? 'You won on time!' : 'You lost on time!');
-    
-    // Show toast notification
-    toast.info(didIWin ? 'Opponent ran out of time - You win!' : 'Time\'s up - You lose!');
-
     // Update server
     try {
       const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
@@ -320,11 +387,15 @@ const Game: React.FC = () => {
           winner,
           adminTimeMs: adminTime,
           studentTimeMs: studentTime,
+          player1TimeMs: player1Time,
+          player2TimeMs: player2Time,
         }),
       });
-      
-      // Emit game-ended via socket
-      socket.sendResign(session._id, winner === 'admin' ? 'student' : 'admin');
+
+      // Emit game-ended via socket (use game-ended so server normalizes winner)
+      socket.sendGameEnded({ sessionId: session._id, result: 'timeout', winner });
+      // notify user that server will confirm the final result
+      toast.info('Time expired; waiting for server to publish final result');
     } catch (err) {
       console.error('Error updating timeout:', err);
     }
@@ -335,10 +406,18 @@ const Game: React.FC = () => {
 
     // Validate it's this player's turn based on piece color
     const currentTurn = game.turn(); // 'w' or 'b'
-    const adminIsWhite = session.adminIsWhite !== false; // default true
-    
-    // Determine if it's my turn based on my color
-    const myColor = role === 'admin' ? (adminIsWhite ? 'w' : 'b') : (adminIsWhite ? 'b' : 'w');
+
+    // Determine whether this is a student-vs-student session
+    const isStudentVsStudent = !!(session.player1Id && session.player2Id);
+    let myColor = 'w';
+    if (isStudentVsStudent) {
+      const p1IsWhite = session.player1IsWhite !== false;
+      const iAmP1 = session.player1Id === user?.id;
+      myColor = iAmP1 ? (p1IsWhite ? 'w' : 'b') : (p1IsWhite ? 'b' : 'w');
+    } else {
+      const adminIsWhite = session.adminIsWhite !== false; // default true
+      myColor = role === 'admin' ? (adminIsWhite ? 'w' : 'b') : (adminIsWhite ? 'b' : 'w');
+    }
     const isMyTurn = currentTurn === myColor;
 
     if (!isMyTurn) {
@@ -354,55 +433,71 @@ const Game: React.FC = () => {
 
       if (!move) return false;
 
-      // Update local state immediately for responsive feel
-      setGame(newGame);
+      // Do not apply move locally until server confirms it (timers switch after confirmation)
 
       // Update session in database
       let status: 'active' | 'completed' = 'active';
       let winner: 'admin' | 'student' | 'draw' | null = null;
 
+      
+
       if (newGame.isCheckmate()) {
         status = 'completed';
         // The player who just moved won. Use the move color (returned by chess.js)
-        const adminIsWhite = session.adminIsWhite !== false;
         const movedColor = move ? move.color : (currentTurn === 'w' ? 'b' : 'w');
-        winner = movedColor === 'w' ? (adminIsWhite ? 'admin' : 'student') : (adminIsWhite ? 'student' : 'admin');
-        const didIWin = winner === role;
-        setGameResult(didIWin ? 'win' : 'lose');
-        setGameStatus('Checkmate!');
+        if (isStudentVsStudent) {
+          const p1IsWhite = session.player1IsWhite !== false;
+          // if movedColor is white and white is player1 => player1 won
+          const winRole = movedColor === 'w' ? (p1IsWhite ? 'player1' : 'player2') : (p1IsWhite ? 'player2' : 'player1');
+          winner = winRole as any;
+        } else {
+          const adminIsWhite = session.adminIsWhite !== false;
+          winner = movedColor === 'w' ? (adminIsWhite ? 'admin' : 'student') : (adminIsWhite ? 'student' : 'admin');
+        }
+        // Don't set final modal locally; wait for server to broadcast authoritative game-ended
         if (timerRef.current) clearInterval(timerRef.current);
       } else if (newGame.isDraw()) {
         status = 'completed';
         winner = 'draw';
-        setGameResult('draw');
-        setGameStatus('Game drawn');
+        // wait for server to broadcast draw result
         if (timerRef.current) clearInterval(timerRef.current);
       } else if (newGame.isCheck()) {
         toast.warning('Check!');
       }
 
       const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
+      const bodyPayload: any = {
+        fen: newGame.fen(),
+        turn: newGame.turn(),
+        status,
+        winner,
+      };
+      if (isStudentVsStudent) {
+        bodyPayload.player1TimeMs = player1Time;
+        bodyPayload.player2TimeMs = player2Time;
+      } else {
+        bodyPayload.adminTimeMs = adminTime;
+        bodyPayload.studentTimeMs = studentTime;
+      }
+
       const res = await fetch(`${API}/sessions/${session._id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          fen: newGame.fen(),
-          turn: newGame.turn(),
-          adminTimeMs: adminTime,
-          studentTimeMs: studentTime,
-          status,
-          winner,
-        }),
+        body: JSON.stringify(bodyPayload),
       });
 
       if (!res.ok) {
         console.error('Error updating game');
-        // Revert local state
-        setGame(new Chess(session.fen));
+        // Server rejected move — clear prevFen (no optimistic state applied)
+        setPrevFen(null);
+        toast.error('Move rejected by server');
         return false;
       }
+
+      // Apply confirmed move locally now (timers will switch because game.turn() changes)
+      setGame(newGame);
 
       // Emit real-time update via SocketProvider
       // Include the last move so remote clients can highlight it even when
@@ -411,8 +506,10 @@ const Game: React.FC = () => {
         sessionId: session._id,
         fen: newGame.fen(),
         turn: newGame.turn(),
-        adminTimeMs: adminTime,
-        studentTimeMs: studentTime,
+        player1TimeMs: isStudentVsStudent ? player1Time : undefined,
+        player2TimeMs: isStudentVsStudent ? player2Time : undefined,
+        adminTimeMs: !isStudentVsStudent ? adminTime : undefined,
+        studentTimeMs: !isStudentVsStudent ? studentTime : undefined,
         lastMove: { from: move.from, to: move.to },
         isCheck: newGame.isCheck(),
       });
@@ -431,7 +528,7 @@ const Game: React.FC = () => {
       console.error('Move error:', error);
       return false;
     }
-  }, [game, session, role, adminTime, studentTime]);
+  }, [game, session, role, adminTime, studentTime, player1Time, player2Time, user?.id]);
 
   const handleUndo = useCallback(async () => {
     if (!session || !prevFen) return;
@@ -447,11 +544,9 @@ const Game: React.FC = () => {
 
   const handleResign = async () => {
     if (!session) return;
-
-    socket.sendResign(session._id, role);
-
-    setGameResult('lose');
-    setGameStatus('You resigned');
+    socket.sendResign({ sessionId: session._id, resignerRole: role });
+    // wait for server to emit final result
+    toast.info('You resigned — waiting for server confirmation');
     if (timerRef.current) clearInterval(timerRef.current);
   };
 
@@ -465,8 +560,7 @@ const Game: React.FC = () => {
     if (!session) return;
     socket.respondDraw(session._id, true);
     setShowDrawRequest(false);
-    setGameResult('draw');
-    setGameStatus('Draw accepted');
+    toast.info('Draw accepted — waiting for server confirmation');
     if (timerRef.current) clearInterval(timerRef.current);
   };
 
@@ -487,7 +581,7 @@ const Game: React.FC = () => {
     // If game is active, send resign to end it for both players, then navigate
     if (session && session.status === 'active') {
       try {
-        socket.sendResign(session._id, role);
+        socket.sendResign({ sessionId: session._id, resignerRole: role });
       } catch (err) {
         console.error('Error sending resign before navigating back', err);
       }
@@ -527,19 +621,48 @@ const Game: React.FC = () => {
 
   const currentTurn = game.turn();
   const isGameActive = session.status === 'active';
-  const playerColor = (session?.adminIsWhite ?? true) ? (role === 'admin' ? 'white' : 'black') : (role === 'admin' ? 'black' : 'white');
-  const opponentColor = playerColor === 'white' ? 'black' : 'white';
-  const isPlayerTurn = (role === 'admin' && currentTurn === (session?.adminIsWhite ? 'w' : 'b')) || (role === 'student' && currentTurn === (session?.adminIsWhite ? 'b' : 'w'));
+  const isStudentVsStudent = !!(session.player1Id && session.player2Id);
+  const myId = user?.id;
+
+  let playerColor = 'white';
+  let opponentColor = 'black';
+  let isPlayerTurn = false;
+  let myName = user?.username || 'You';
+  let opponentName = 'Opponent';
+  let myTimeSec = 600;
+  let oppTimeSec = 600;
+
+  if (isStudentVsStudent) {
+    const p1IsWhite = session.player1IsWhite !== false;
+    const iAmP1 = session.player1Id === myId;
+    playerColor = iAmP1 ? (p1IsWhite ? 'white' : 'black') : (p1IsWhite ? 'black' : 'white');
+    opponentColor = playerColor === 'white' ? 'black' : 'white';
+    isPlayerTurn = iAmP1 ? (currentTurn === (p1IsWhite ? 'w' : 'b')) : (currentTurn === (p1IsWhite ? 'b' : 'w'));
+    myName = iAmP1 ? (session.player1Name || (iAmP1 ? user?.username || 'Player 1' : 'Player 1')) : (session.player2Name || 'Player 2');
+    opponentName = iAmP1 ? (session.player2Name || 'Player 2') : (session.player1Name || 'Player 1');
+    myTimeSec = Math.floor((iAmP1 ? player1Time : player2Time) / 1000);
+    oppTimeSec = Math.floor((iAmP1 ? player2Time : player1Time) / 1000);
+  } else {
+    const adminIsWhite = session.adminIsWhite !== false;
+    const iAmAdmin = role === 'admin';
+    playerColor = iAmAdmin ? (adminIsWhite ? 'white' : 'black') : (adminIsWhite ? 'black' : 'white');
+    opponentColor = playerColor === 'white' ? 'black' : 'white';
+    isPlayerTurn = iAmAdmin ? (currentTurn === (adminIsWhite ? 'w' : 'b')) : (currentTurn === (adminIsWhite ? 'b' : 'w'));
+    myName = iAmAdmin ? (session.adminName || user?.username || 'Coach') : (session.studentName || 'Student');
+    opponentName = iAmAdmin ? (session.studentName || 'Student') : (session.adminName || 'Coach');
+    myTimeSec = Math.floor((iAmAdmin ? adminTime : studentTime) / 1000);
+    oppTimeSec = Math.floor((iAmAdmin ? studentTime : adminTime) / 1000);
+  }
 
   return (
     <div className="min-h-screen bg-background p-2 sm:p-4 md:p-6">
       <div className="flex flex-col gap-3 md:gap-4 w-full max-w-2xl mx-auto">
         {/* Opponent info (top) */}
         <PlayerInfo
-          name={role === 'admin' ? 'Student' : 'Coach'}
-          role={role === 'admin' ? 'student' : 'coach'}
+          name={opponentName}
+          role={isStudentVsStudent ? 'student' : (role === 'admin' ? 'student' : 'coach')}
           color={opponentColor}
-          timeLeft={Math.floor((role === 'admin' ? studentTime : adminTime) / 1000)}
+          timeLeft={oppTimeSec}
           isActive={!isPlayerTurn}
         />
 
@@ -548,16 +671,16 @@ const Game: React.FC = () => {
           game={game}
           onMove={handleMove}
           orientation={playerColor}
-          disabled={!isGameActive || !isPlayerTurn}
+          disabled={!isGameActive || !isPlayerTurn || isSpectator}
           lastMove={remoteLastMove}
         />
 
         {/* Player info (bottom) */}
         <PlayerInfo
-          name={role === 'admin' ? 'Coach' : 'Student'}
-          role={role === 'admin' ? 'coach' : 'student'}
+          name={myName}
+          role={isStudentVsStudent ? 'student' : (role === 'admin' ? 'coach' : 'student')}
           color={playerColor}
-          timeLeft={Math.floor((role === 'admin' ? adminTime : studentTime) / 1000)}
+          timeLeft={myTimeSec}
           isActive={isPlayerTurn}
         />
 

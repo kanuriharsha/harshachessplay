@@ -22,6 +22,11 @@ mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true 
   .then(() => console.log('MongoDB connected'))
   .catch((err) => console.error('MongoDB connection error:', err));
 
+// Health check endpoint for Render wake-up
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 // Auth routes
 app.post('/auth/signup', async (req, res) => {
   const { username, email, password, role } = req.body;
@@ -73,6 +78,31 @@ app.get('/users', async (req, res) => {
   }
 });
 
+// Get online students (for student-to-student play)
+app.get('/users/online', async (req, res) => {
+  try {
+    const requesterId = req.query.requesterId;
+    // Get all registered users with student role
+    const students = await User.find({ role: 'student' }).select('-password -__v').exec();
+    
+    // Filter out the requester and mark online status based on connected sockets
+    const onlineStudents = students
+      .filter(s => String(s._id) !== requesterId)
+      .map(s => ({
+        id: s._id,
+        username: s.username,
+        email: s.email,
+        isOnline: userSockets[String(s._id)] && userSockets[String(s._id)].size > 0
+      }));
+    
+    res.json({ students: onlineStudents });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
 app.patch('/users/:id', async (req, res) => {
   const { id } = req.params;
   const { username, password, email } = req.body;
@@ -92,6 +122,180 @@ app.patch('/users/:id', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// Delete a user (admin)
+app.delete('/users/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    if (!mongoose.Types.ObjectId.isValid(String(id))) return res.status(400).json({ error: 'Invalid user id' });
+    const deleted = await User.findByIdAndDelete(id).exec();
+    if (!deleted) return res.status(404).json({ error: 'User not found' });
+    // cleanup any socket registrations
+    const uid = String(deleted._id);
+    if (userSockets[uid]) {
+      for (const sid of Array.from(userSockets[uid])) {
+        try { io.to(sid).disconnectSockets(); } catch (e) {}
+      }
+      delete userSockets[uid];
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting user:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Student-to-student play requests
+app.post('/play-requests', async (req, res) => {
+  const { fromStudentId, toStudentId, timeControl } = req.body;
+  if (!fromStudentId || !toStudentId) {
+    return res.status(400).json({ error: 'Both student IDs required' });
+  }
+  
+  try {
+    // Check if request already exists
+    const existing = await GameRequest.findOne({
+      studentId: fromStudentId,
+      targetStudentId: toStudentId,
+      status: 'pending'
+    }).exec();
+    
+    if (existing) {
+      return res.status(400).json({ error: 'Request already sent' });
+    }
+    
+    const request = await GameRequest.create({
+      studentId: fromStudentId,
+      targetStudentId: toStudentId,
+      timeControl: timeControl || 10,
+      status: 'pending'
+    });
+    
+    // Notify target student via socket
+    const targetSockets = userSockets[String(toStudentId)];
+    if (targetSockets) {
+      const fromUser = await User.findById(fromStudentId).exec();
+      for (const sid of targetSockets) {
+        io.to(sid).emit('play-request-received', {
+          requestId: request._id,
+          from: {
+            id: fromStudentId,
+            username: fromUser?.username || 'Unknown'
+          },
+          timeControl: request.timeControl
+        });
+      }
+    }
+    
+    res.json({ request });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get incoming play requests for a student
+app.get('/play-requests/incoming/:studentId', async (req, res) => {
+  const { studentId } = req.params;
+  try {
+    const requests = await GameRequest.find({
+      targetStudentId: studentId,
+      status: 'pending'
+    }).sort({ createdAt: -1 }).exec();
+    
+    // Populate sender info
+    const populatedRequests = await Promise.all(
+      requests.map(async (r) => {
+        const sender = await User.findById(r.studentId).exec();
+        return {
+          id: r._id,
+          from: {
+            id: r.studentId,
+            username: sender?.username || 'Unknown'
+          },
+          timeControl: r.timeControl,
+          createdAt: r.createdAt
+        };
+      })
+    );
+    
+    res.json({ requests: populatedRequests });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Accept/reject student play request
+app.patch('/play-requests/:id/respond', async (req, res) => {
+  const { id } = req.params;
+  const { accepted, responderId } = req.body;
+  
+  try {
+    const request = await GameRequest.findById(id).exec();
+    if (!request) return res.status(404).json({ error: 'Request not found' });
+    
+    if (accepted) {
+      request.status = 'accepted';
+      await request.save();
+      
+      // Create game session between two students with complementary colors
+      const p1IsWhite = Math.random() > 0.5;
+      const session = await GameSession.create({
+        player1Id: request.studentId,
+        player2Id: request.targetStudentId,
+        player1TimeMs: (request.timeControl || 10) * 60000,
+        player2TimeMs: (request.timeControl || 10) * 60000,
+        player1IsWhite: p1IsWhite,
+        player2IsWhite: !p1IsWhite,
+        gameMode: 'serious',
+        status: 'active'
+      });
+      
+      // Notify both students
+      const payload = { 
+        sessionId: session._id.toString(), 
+        session: session 
+      };
+      
+      const player1Sockets = userSockets[String(request.studentId)];
+      const player2Sockets = userSockets[String(request.targetStudentId)];
+      
+      if (player1Sockets) {
+        for (const sid of player1Sockets) {
+          io.to(sid).emit('session-created', payload);
+        }
+      }
+      if (player2Sockets) {
+        for (const sid of player2Sockets) {
+          io.to(sid).emit('session-created', payload);
+        }
+      }
+      
+      res.json({ request, session });
+    } else {
+      request.status = 'rejected';
+      await request.save();
+      
+      // Notify requester
+      const requesterSockets = userSockets[String(request.studentId)];
+      if (requesterSockets) {
+        for (const sid of requesterSockets) {
+          io.to(sid).emit('play-request-rejected', {
+            requestId: request._id,
+            message: 'Your play request was declined'
+          });
+        }
+      }
+      
+      res.json({ request });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 
 // Requests
 app.post('/requests', async (req, res) => {
@@ -208,22 +412,226 @@ app.get('/sessions/active', async (req, res) => {
   try {
     // If caller requests all active sessions (for server-side joining of rooms), return any active session
     if (req.query.all) {
-      const session = await GameSession.findOne({ status: 'active' }).sort({ createdAt: -1 }).exec();
-      return res.json({ session });
+      const sessions = await GameSession.find({ status: 'active' }).sort({ createdAt: -1 }).exec();
+      // Populate player names
+      const populatedSessions = await Promise.all(
+        sessions.map(async (s) => {
+          let player1Name = 'Unknown';
+          let player2Name = 'Unknown';
+          
+          if (s.player1Id && mongoose.Types.ObjectId.isValid(String(s.player1Id))) {
+            const p1 = await User.findById(s.player1Id).exec();
+            player1Name = p1?.username || 'Unknown';
+          } else if (s.player1Id) {
+            player1Name = String(s.player1Id);
+          } else if (s.adminId && mongoose.Types.ObjectId.isValid(String(s.adminId))) {
+            const admin = await User.findById(s.adminId).exec();
+            player1Name = admin?.username || 'Admin';
+          } else if (s.adminId) {
+            player1Name = String(s.adminId);
+          }
+          
+          if (s.player2Id && mongoose.Types.ObjectId.isValid(String(s.player2Id))) {
+            const p2 = await User.findById(s.player2Id).exec();
+            player2Name = p2?.username || 'Unknown';
+          } else if (s.player2Id) {
+            player2Name = String(s.player2Id);
+          } else if (s.studentId && mongoose.Types.ObjectId.isValid(String(s.studentId))) {
+            const student = await User.findById(s.studentId).exec();
+            player2Name = student?.username || 'Student';
+          } else if (s.studentId) {
+            player2Name = String(s.studentId);
+          }
+          
+          return {
+            ...s.toObject(),
+            player1Name,
+            player2Name
+          };
+        })
+      );
+      return res.json({ sessions: populatedSessions });
     }
 
-    // Default behavior: try to resolve session for a specific user (fallbacks to default_student/admin)
+    // Default behavior: try to resolve session for a specific user
     const userId = req.query.userId || 'default_student';
     const session = await GameSession.findOne({
       status: 'active',
-      $or: [{ adminId: userId }, { studentId: userId }]
+      $or: [
+        { adminId: userId }, 
+        { studentId: userId },
+        { player1Id: userId },
+        { player2Id: userId }
+      ]
     }).sort({ createdAt: -1 }).exec();
+    if (!session) return res.json({ session: null });
+
+    // Populate names for single session return
+    const s = session.toObject();
+    if (s.player1Id && mongoose.Types.ObjectId.isValid(String(s.player1Id))) {
+      const p1 = await User.findById(s.player1Id).exec();
+      s.player1Name = p1?.username || null;
+    }
+    if (s.player2Id && mongoose.Types.ObjectId.isValid(String(s.player2Id))) {
+      const p2 = await User.findById(s.player2Id).exec();
+      s.player2Name = p2?.username || null;
+    }
+    if (s.adminId && mongoose.Types.ObjectId.isValid(String(s.adminId))) {
+      const a = await User.findById(s.adminId).exec();
+      s.adminName = a?.username || null;
+    }
+    if (s.studentId && mongoose.Types.ObjectId.isValid(String(s.studentId))) {
+      const st = await User.findById(s.studentId).exec();
+      s.studentName = st?.username || null;
+    }
+
+    res.json({ session: s });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get session by id
+app.get('/sessions/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const s = await GameSession.findById(id).exec();
+    if (!s) return res.status(404).json({ error: 'Session not found' });
+
+    // Populate friendly player names similar to /sessions/active
+    let player1Name = null;
+    let player2Name = null;
+    let adminName = null;
+    let studentName = null;
+
+    if (s.player1Id && mongoose.Types.ObjectId.isValid(String(s.player1Id))) {
+      const p1 = await User.findById(s.player1Id).exec();
+      player1Name = p1?.username || null;
+    } else if (s.player1Id) {
+      player1Name = String(s.player1Id);
+    }
+    if (s.player2Id && mongoose.Types.ObjectId.isValid(String(s.player2Id))) {
+      const p2 = await User.findById(s.player2Id).exec();
+      player2Name = p2?.username || null;
+    } else if (s.player2Id) {
+      player2Name = String(s.player2Id);
+    }
+    if (s.adminId && mongoose.Types.ObjectId.isValid(String(s.adminId))) {
+      const a = await User.findById(s.adminId).exec();
+      adminName = a?.username || null;
+    } else if (s.adminId) {
+      adminName = String(s.adminId);
+    }
+    if (s.studentId && mongoose.Types.ObjectId.isValid(String(s.studentId))) {
+      const st = await User.findById(s.studentId).exec();
+      studentName = st?.username || null;
+    } else if (s.studentId) {
+      studentName = String(s.studentId);
+    }
+
+    const out = {
+      ...s.toObject(),
+      player1Name,
+      player2Name,
+      adminName,
+      studentName,
+    };
+
+    // Resolve winnerId when winner is a role string
+    try {
+      let winnerId = null;
+      if (out.winner) {
+        winnerId = getUserIdByRole(s, out.winner) || (typeof out.winner === 'string' && out.winner.match(/^[a-fA-F0-9]{24}$/) ? out.winner : null);
+      }
+      out.winnerId = winnerId;
+    } catch (err) {
+      out.winnerId = null;
+    }
+
+    res.json({ session: out });
+  } catch (err) {
+    console.error('Error fetching session by id:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get recent sessions (all statuses) - for admin review
+app.get('/sessions', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 50;
+    const sessions = await GameSession.find({}).sort({ createdAt: -1 }).limit(limit).exec();
+    const populated = await Promise.all(sessions.map(async (s) => {
+      let player1Name = null;
+      let player2Name = null;
+      let adminName = null;
+      let studentName = null;
+          if (s.player1Id && mongoose.Types.ObjectId.isValid(String(s.player1Id))) {
+            const p1 = await User.findById(s.player1Id).exec();
+            player1Name = p1?.username || null;
+          } else if (s.player1Id) {
+            player1Name = String(s.player1Id);
+          }
+          if (s.player2Id && mongoose.Types.ObjectId.isValid(String(s.player2Id))) {
+            const p2 = await User.findById(s.player2Id).exec();
+            player2Name = p2?.username || null;
+          } else if (s.player2Id) {
+            player2Name = String(s.player2Id);
+          }
+          if (s.adminId && mongoose.Types.ObjectId.isValid(String(s.adminId))) {
+            const a = await User.findById(s.adminId).exec();
+            adminName = a?.username || null;
+          } else if (s.adminId) {
+            adminName = String(s.adminId);
+          }
+          if (s.studentId && mongoose.Types.ObjectId.isValid(String(s.studentId))) {
+            const st = await User.findById(s.studentId).exec();
+            studentName = st?.username || null;
+          } else if (s.studentId) {
+            studentName = String(s.studentId);
+          }
+      const out = { ...s.toObject(), player1Name, player2Name, adminName, studentName };
+      try {
+        let winnerId = null;
+        if (out.winner) {
+          winnerId = getUserIdByRole(s, out.winner) || (typeof out.winner === 'string' && out.winner.match(/^[a-fA-F0-9]{24}$/) ? out.winner : null);
+        }
+        out.winnerId = winnerId;
+      } catch (err) {
+        out.winnerId = null;
+      }
+      return out;
+    }));
+    res.json({ sessions: populated });
+  } catch (err) {
+    console.error('Error fetching sessions list:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Endpoint for admin to join as spectator
+app.post('/sessions/:id/spectate', async (req, res) => {
+  const { id } = req.params;
+  const { adminId } = req.body;
+  
+  try {
+    const session = await GameSession.findById(id).exec();
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    
+    // Add admin to spectators if not already present
+    if (!session.spectators) session.spectators = [];
+    if (!session.spectators.includes(adminId)) {
+      session.spectators.push(adminId);
+      await session.save();
+    }
+    
     res.json({ session });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 
 app.patch('/sessions/:id', async (req, res) => {
   const { id } = req.params;
@@ -247,6 +655,20 @@ app.patch('/sessions/:id', async (req, res) => {
   }
 });
 
+// Delete a session (admin) - removes session record from DB
+app.delete('/sessions/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    if (!mongoose.Types.ObjectId.isValid(String(id))) return res.status(400).json({ error: 'Invalid session id' });
+    const deleted = await GameSession.findByIdAndDelete(id).exec();
+    if (!deleted) return res.status(404).json({ error: 'Session not found' });
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting session:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
 const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 const { Server: IOServer } = require('socket.io');
@@ -265,6 +687,18 @@ const socketToSession = {}; // { [socketId]: { sessionId, role } }
 const userSockets = {}; // { [userId]: Set(socketId) }
 const socketToUser = {}; // { [socketId]: userId }
 
+// Helper: map a session and a role string to a userId when possible
+function getUserIdByRole(session, role) {
+  if (!role || !session) return null;
+  if (role === 'admin') return session.adminId || null;
+  if (role === 'student') return session.studentId || null;
+  if (role === 'player1') return session.player1Id || null;
+  if (role === 'player2') return session.player2Id || null;
+  // If role looks like an id (24 hex chars), assume it's an id
+  if (typeof role === 'string' && role.match(/^[a-fA-F0-9]{24}$/)) return role;
+  return null;
+}
+
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
@@ -282,48 +716,112 @@ io.on('connection', (socket) => {
     // Accept either string sessionId or object { sessionId, role }
     let sessionId = null;
     let role = null;
+    let isSpectator = false;
+    
     if (typeof data === 'string') sessionId = data;
     else if (data && data.sessionId) {
       sessionId = data.sessionId;
       role = data.role;
+      isSpectator = data.isSpectator || false;
     }
 
     if (!sessionId) return;
     socket.join(sessionId);
-    console.log(`User ${socket.id} joined session ${sessionId} role=${role}`);
+    console.log(`User ${socket.id} joined session ${sessionId} role=${role} spectator=${isSpectator}`);
 
     // initialize mapping
-    if (!sessionSockets[sessionId]) sessionSockets[sessionId] = { admin: null, student: null };
-    if (role === 'admin') sessionSockets[sessionId].admin = socket.id;
-    else if (role === 'student') sessionSockets[sessionId].student = socket.id;
-    else {
+    if (!sessionSockets[sessionId]) sessionSockets[sessionId] = { admin: null, student: null, player1: null, player2: null, spectators: [] };
+    
+    if (isSpectator) {
+      // Add to spectators list
+      sessionSockets[sessionId].spectators.push(socket.id);
+    } else if (role === 'admin') {
+      sessionSockets[sessionId].admin = socket.id;
+    } else if (role === 'student') {
+      sessionSockets[sessionId].student = socket.id;
+    } else if (role === 'player1') {
+      sessionSockets[sessionId].player1 = socket.id;
+    } else if (role === 'player2') {
+      sessionSockets[sessionId].player2 = socket.id;
+    } else {
       // unknown role: try to fill empty slot
-      if (!sessionSockets[sessionId].admin) sessionSockets[sessionId].admin = socket.id;
+      if (!sessionSockets[sessionId].player1) sessionSockets[sessionId].player1 = socket.id;
+      else if (!sessionSockets[sessionId].player2) sessionSockets[sessionId].player2 = socket.id;
+      else if (!sessionSockets[sessionId].admin) sessionSockets[sessionId].admin = socket.id;
       else if (!sessionSockets[sessionId].student) sessionSockets[sessionId].student = socket.id;
     }
 
-    socketToSession[socket.id] = { sessionId, role };
+    socketToSession[socket.id] = { sessionId, role, isSpectator };
   });
 
   socket.on('move', async (data) => {
-    const { sessionId, fen, turn, adminTimeMs, studentTimeMs } = data;
+    const { sessionId, fen, turn } = data;
+    const socketInfo = socketToSession[socket.id];
+    
+    // Prevent spectators from making moves
+    if (socketInfo && socketInfo.isSpectator) {
+      console.log('Spectator attempted to make a move - blocked');
+      return;
+    }
+    
     try {
       const session = await GameSession.findById(sessionId).exec();
       if (session) {
         session.fen = fen;
         session.turn = turn;
-        if (adminTimeMs !== undefined) session.adminTimeMs = adminTimeMs;
-        if (studentTimeMs !== undefined) session.studentTimeMs = studentTimeMs;
+        
+        // Support both admin/student and player1/player2 time formats
+        if (data.adminTimeMs !== undefined) session.adminTimeMs = data.adminTimeMs;
+        if (data.studentTimeMs !== undefined) session.studentTimeMs = data.studentTimeMs;
+        if (data.player1TimeMs !== undefined) session.player1TimeMs = data.player1TimeMs;
+        if (data.player2TimeMs !== undefined) session.player2TimeMs = data.player2TimeMs;
+        
         session.lastMoveAt = new Date();
         await session.save();
-        // Forward lastMove from the client if provided so remote clients can
-        // highlight the recent move (FEN alone doesn't preserve history).
-        const payload = { fen, turn, adminTimeMs, studentTimeMs };
+        
+        // Broadcast to all in room (players + spectators)
+        const payload = { 
+          fen, 
+          turn,
+          adminTimeMs: session.adminTimeMs,
+          studentTimeMs: session.studentTimeMs,
+          player1TimeMs: session.player1TimeMs,
+          player2TimeMs: session.player2TimeMs
+        };
         if (data && data.lastMove) payload.lastMove = data.lastMove;
         io.to(sessionId).emit('game-update', payload);
       }
     } catch (err) {
       console.error('Move update error:', err);
+    }
+  });
+
+  // Timer timeout from client: declare opponent the winner
+  socket.on('timeout', async (data) => {
+    const { sessionId, timedOutRole } = data || {};
+    if (!sessionId || !timedOutRole) return;
+    try {
+      const session = await GameSession.findById(sessionId).exec();
+      if (!session) return;
+      session.status = 'completed';
+
+      // Determine winner role opposite of timedOutRole
+      let winnerRole = null;
+      if (timedOutRole === 'admin') winnerRole = 'student';
+      else if (timedOutRole === 'student') winnerRole = 'admin';
+      else if (timedOutRole === 'player1') winnerRole = 'player2';
+      else if (timedOutRole === 'player2') winnerRole = 'player1';
+
+      const winnerId = getUserIdByRole(session, winnerRole) || null;
+      const loserId = getUserIdByRole(session, timedOutRole) || null;
+
+      session.winner = winnerId || winnerRole || 'opponent';
+      await session.save();
+
+      io.to(sessionId).emit('game-ended', { result: 'timeout', winner: session.winner, winnerId, loserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id, timedOutRole });
+      // keep session in DB for admin review
+    } catch (err) {
+      console.error('Timeout handler error:', err);
     }
   });
 
@@ -362,14 +860,8 @@ io.on('connection', (socket) => {
           session.status = 'completed';
           session.winner = 'draw';
           await session.save();
-          io.to(sessionId).emit('game-ended', { result: 'draw', winner: 'draw', sessionId: session._id.toString() });
-          // destroy session permanently
-          try {
-            await GameSession.deleteOne({ _id: session._id }).exec();
-            console.log('Deleted session after draw:', session._id.toString());
-          } catch (delErr) {
-            console.error('Failed to delete session after draw:', delErr);
-          }
+          io.to(sessionId).emit('game-ended', { result: 'draw', winner: 'draw', winnerId: null, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id });
+          // keep session in DB so admin/spectators can review results later
         }
       } else {
         socket.to(sessionId).emit('draw-declined');
@@ -385,16 +877,42 @@ io.on('connection', (socket) => {
       const session = await GameSession.findById(sessionId).exec();
       if (session) {
         session.status = 'completed';
-        session.winner = resignerRole === 'admin' ? 'student' : 'admin';
-        await session.save();
-        io.to(sessionId).emit('game-ended', { result: 'resign', winner: session.winner, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId });
-        // destroy session permanently
-        try {
-          await GameSession.deleteOne({ _id: session._id }).exec();
-          console.log('Deleted session after resign:', session._id.toString());
-        } catch (delErr) {
-          console.error('Failed to delete session after resign:', delErr);
+
+        // Try to resolve the actual resigner by socket->user mapping first (handles student-vs-student)
+        const resignerUserId = socketToUser[socket.id] || null;
+
+        // Determine loser and winner userIds
+        let loserId = null;
+        let winnerId = null;
+
+        if (resignerUserId) {
+          loserId = resignerUserId;
+          // Opponent determination for student-vs-student or admin-student
+          if (session.player1Id && session.player2Id) {
+            winnerId = session.player1Id === resignerUserId ? session.player2Id : (session.player2Id === resignerUserId ? session.player1Id : null);
+          } else if (session.adminId && session.studentId) {
+            winnerId = session.adminId === resignerUserId ? session.studentId : (session.studentId === resignerUserId ? session.adminId : null);
+          }
         }
+
+        // If we couldn't determine by socket mapping, fall back to role string resolution
+        if (!winnerId) {
+          if (resignerRole === 'admin') winnerId = session.studentId || null;
+          else if (resignerRole === 'student') winnerId = session.adminId || null;
+          else if (resignerRole === 'player1') winnerId = session.player2Id || null;
+          else if (resignerRole === 'player2') winnerId = session.player1Id || null;
+        }
+
+        // If loserId not set, try resolving via role
+        if (!loserId) {
+          loserId = getUserIdByRole(session, resignerRole) || null;
+        }
+
+        session.winner = winnerId || (resignerRole === 'admin' ? 'student' : (resignerRole === 'student' ? 'admin' : 'opponent'));
+        await session.save();
+
+        io.to(sessionId).emit('game-ended', { result: 'resign', winner: session.winner, winnerId, loserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id });
+        // keep session record for auditing
       }
     } catch (err) {
       console.error('Resign error:', err);
@@ -409,16 +927,19 @@ io.on('connection', (socket) => {
       const session = await GameSession.findById(sessionId).exec();
       if (!session) return;
       session.status = 'completed';
-      if (winner) session.winner = winner;
-      await session.save();
-      io.to(sessionId).emit('game-ended', { result: result || 'ended', winner: session.winner, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId });
-      // destroy session permanently
-      try {
-        await GameSession.deleteOne({ _id: session._id }).exec();
-        console.log('Deleted session after game-ended:', session._id.toString());
-      } catch (delErr) {
-        console.error('Failed to delete session after game-ended:', delErr);
+      // Normalize winner: could be a role ('admin','student','player1','player2') or a userId
+      let winnerId = null;
+      if (winner) {
+        // try to resolve role to userId
+        winnerId = getUserIdByRole(session, winner) || (typeof winner === 'string' && winner.match(/^[a-fA-F0-9]{24}$/) ? winner : null);
+        session.winner = winnerId || winner;
       }
+      await session.save();
+      const player1Id = session.player1Id || null;
+      const player2Id = session.player2Id || null;
+      const loserId = winnerId ? (winnerId === player1Id ? player2Id : (winnerId === player2Id ? player1Id : null)) : null;
+      io.to(sessionId).emit('game-ended', { result: result || 'ended', winner: session.winner, winnerId, loserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id, player2Id });
+      // keep session record for later review by admins/spectators
     } catch (err) {
       console.error('game-ended handler error:', err);
     }
@@ -458,34 +979,22 @@ io.on('connection', (socket) => {
       if (session) {
         // If one player left (remainingSocketId exists) -> remaining player wins
         if (remainingSocketId) {
-          // determine winner role (the opposite of the disconnected role if provided)
-          let winnerRole = null;
-          if (role === 'admin') winnerRole = 'student';
-          else if (role === 'student') winnerRole = 'admin';
-          else {
-            // fallback: if admin slot occupied then admin wins else student
-            winnerRole = sessionSockets[sessionId] && sessionSockets[sessionId].admin ? 'admin' : 'student';
-          }
+          // Map remaining socket to a userId if possible
+          const winnerUserId = socketToUser[remainingSocketId] || null;
+
+          // Also try to determine loser userId
+          const disconnectedUserId = socketToUser[socket.id] || null;
 
           session.status = 'completed';
-          session.winner = winnerRole;
+          session.winner = winnerUserId || null;
           await session.save();
-          io.to(sessionId).emit('game-ended', { result: 'opponent-left', winner: winnerRole, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId });
-          // destroy session
-          try {
-            await GameSession.deleteOne({ _id: session._id }).exec();
-            console.log('Deleted session after disconnect:', session._id.toString());
-          } catch (delErr) {
-            console.error('Failed to delete session after disconnect:', delErr);
-          }
+          io.to(sessionId).emit('game-ended', { result: 'opponent-left', winner: session.winner, winnerId: winnerUserId, loserId: disconnectedUserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id });
+          // keep session record for admin review
         } else {
-          // No players left in room; ensure session removed
-          try {
-            await GameSession.deleteOne({ _id: session._id }).exec();
-            console.log('Deleted session (no players left):', session._id.toString());
-          } catch (delErr) {
-            console.error('Failed to delete empty session:', delErr);
-          }
+          // No players left in room; mark session completed so admin can review later
+          session.status = session.status || 'completed';
+          await session.save();
+          console.log('Marked session completed (no players left):', session._id.toString());
         }
       }
     } catch (err) {

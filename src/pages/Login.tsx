@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { toast } from 'sonner';
 import { Crown, GraduationCap, LogIn, Eye, EyeOff } from 'lucide-react';
+import { initHealthCheck } from '@/lib/healthCheck';
 
 const Login: React.FC = () => {
   const [username, setUsername] = useState('');
@@ -15,6 +16,11 @@ const Login: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const { signIn, role } = useAuth();
   const navigate = useNavigate();
+
+  // Wake up backend when login page loads
+  useEffect(() => {
+    initHealthCheck();
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

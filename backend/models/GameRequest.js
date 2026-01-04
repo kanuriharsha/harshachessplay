@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const GameRequestSchema = new mongoose.Schema({
   studentId: { type: String, required: true },
+  targetStudentId: { type: String, default: null }, // For student-to-student requests
   status: { type: String, enum: ['pending', 'accepted', 'rejected'], default: 'pending' },
   timeControl: { type: Number, default: null },
   gameMode: { type: String, enum: ['friendly', 'serious'], default: 'serious' },
