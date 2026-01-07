@@ -72,6 +72,13 @@ const AdminDashboard: React.FC = () => {
   const [sortBy, setSortBy] = useState<'date' | 'winner' | 'loser'>('date');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
+  // Admin start game between students state
+  const [student1Id, setStudent1Id] = useState<string>('');
+  const [student2Id, setStudent2Id] = useState<string>('');
+  const [gameTimeControl, setGameTimeControl] = useState<number>(15);
+  const [student1IsWhite, setStudent1IsWhite] = useState<boolean>(true);
+  const [creatingGame, setCreatingGame] = useState(false);
+
   // Wake up backend when dashboard loads
   useEffect(() => {
     initHealthCheck();
@@ -372,6 +379,49 @@ const AdminDashboard: React.FC = () => {
     } catch (err) {
       console.error('Delete user failed', err);
       toast.error('Network error deleting user');
+    }
+  };
+
+  const handleStartStudentGame = async () => {
+    if (!student1Id || !student2Id) {
+      toast.error('Please select both students');
+      return;
+    }
+    if (student1Id === student2Id) {
+      toast.error('Please select two different students');
+      return;
+    }
+    
+    setCreatingGame(true);
+    try {
+      const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
+      const res = await fetch(`${API}/sessions/create-student-game`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          student1Id,
+          student2Id,
+          timeControl: gameTimeControl,
+          student1IsWhite
+        })
+      });
+      
+      if (res.ok) {
+        toast.success('Game created! Students have been notified.');
+        setStudent1Id('');
+        setStudent2Id('');
+        setGameTimeControl(15);
+        setStudent1IsWhite(true);
+        fetchActiveGames();
+      } else {
+        const body = await res.json().catch(() => ({}));
+        toast.error(body.error || 'Failed to create game');
+      }
+    } catch (err) {
+      console.error('Create game failed', err);
+      toast.error('Network error creating game');
+    } finally {
+      setCreatingGame(false);
     }
   };
 
@@ -792,6 +842,136 @@ const AdminDashboard: React.FC = () => {
                 ))}
               </div>
             )}
+          </CardContent>
+        </Card>
+
+        {/* Admin Start Game Between Students */}
+        <Card className="card-shadow">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Gamepad2 className="w-5 h-5" />
+              Start Game Between Students
+            </CardTitle>
+            <CardDescription>
+              Create a match between two students and set time control & colors
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="student1" className="text-sm font-medium">
+                    Student 1
+                  </Label>
+                  <select
+                    id="student1"
+                    value={student1Id}
+                    onChange={(e) => setStudent1Id(e.target.value)}
+                    className="w-full px-3 py-2 border rounded-md bg-background"
+                    disabled={creatingGame}
+                  >
+                    <option value="">Select Student 1</option>
+                    {users.filter(u => u.role === 'student').map((student) => (
+                      <option key={student.id} value={student.id}>
+                        {student.username || student.email}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="student2" className="text-sm font-medium">
+                    Student 2
+                  </Label>
+                  <select
+                    id="student2"
+                    value={student2Id}
+                    onChange={(e) => setStudent2Id(e.target.value)}
+                    className="w-full px-3 py-2 border rounded-md bg-background"
+                    disabled={creatingGame}
+                  >
+                    <option value="">Select Student 2</option>
+                    {users.filter(u => u.role === 'student' && u.id !== student1Id).map((student) => (
+                      <option key={student.id} value={student.id}>
+                        {student.username || student.email}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Time Control (minutes)</Label>
+                <div className="flex flex-wrap gap-2">
+                  {TIME_OPTIONS.map((time) => (
+                    <Button
+                      key={time}
+                      variant={gameTimeControl === time ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => setGameTimeControl(time)}
+                      disabled={creatingGame}
+                    >
+                      {time} min
+                    </Button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Piece Colors</Label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <Button
+                    variant={student1IsWhite ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setStudent1IsWhite(true)}
+                    disabled={creatingGame || !student1Id}
+                    className="w-full justify-start gap-2"
+                  >
+                    <div className="w-6 h-6 rounded-full bg-white border-2 border-gray-300 flex items-center justify-center">
+                      <span className="text-xs font-bold text-black">W</span>
+                    </div>
+                    <span className="flex-1 text-left">
+                      {users.find(u => u.id === student1Id)?.username || 'Student 1'} plays White
+                    </span>
+                  </Button>
+                  <Button
+                    variant={!student1IsWhite ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setStudent1IsWhite(false)}
+                    disabled={creatingGame || !student1Id}
+                    className="w-full justify-start gap-2"
+                  >
+                    <div className="w-6 h-6 rounded-full bg-gray-800 border-2 border-gray-600 flex items-center justify-center">
+                      <span className="text-xs font-bold text-white">B</span>
+                    </div>
+                    <span className="flex-1 text-left">
+                      {users.find(u => u.id === student1Id)?.username || 'Student 1'} plays Black
+                    </span>
+                  </Button>
+                </div>
+              </div>
+
+              <div className="pt-2">
+                <Button
+                  onClick={handleStartStudentGame}
+                  disabled={!student1Id || !student2Id || creatingGame}
+                  className="w-full gap-2"
+                  size="lg"
+                >
+                  {creatingGame ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Creating Game...
+                    </>
+                  ) : (
+                    <>
+                      <Gamepad2 className="w-4 h-4" />
+                      Start Game
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
           </CardContent>
         </Card>
           </TabsContent>

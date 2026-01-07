@@ -656,6 +656,73 @@ app.post('/sessions/:id/spectate', async (req, res) => {
   }
 });
 
+// Admin creates a game between two students
+app.post('/sessions/create-student-game', async (req, res) => {
+  const { student1Id, student2Id, timeControl, student1IsWhite } = req.body;
+  
+  if (!student1Id || !student2Id) {
+    return res.status(400).json({ error: 'Both student IDs required' });
+  }
+  
+  if (student1Id === student2Id) {
+    return res.status(400).json({ error: 'Cannot create game between same student' });
+  }
+  
+  try {
+    // Verify both are students
+    const student1 = await User.findById(student1Id).exec();
+    const student2 = await User.findById(student2Id).exec();
+    
+    if (!student1 || !student2) {
+      return res.status(404).json({ error: 'One or both students not found' });
+    }
+    
+    if (student1.role !== 'student' || student2.role !== 'student') {
+      return res.status(400).json({ error: 'Both users must be students' });
+    }
+    
+    // Create session
+    const timeMs = (timeControl || 15) * 60000;
+    const session = await GameSession.create({
+      player1Id: student1Id,
+      player2Id: student2Id,
+      player1TimeMs: timeMs,
+      player2TimeMs: timeMs,
+      player1IsWhite: student1IsWhite === undefined ? true : !!student1IsWhite,
+      player2IsWhite: student1IsWhite === undefined ? false : !student1IsWhite,
+      gameMode: 'serious',
+      status: 'active'
+    });
+    
+    // Notify both students via socket
+    const payload = { 
+      sessionId: session._id.toString(), 
+      session: session,
+      message: 'Admin has started a game for you!'
+    };
+    
+    const s1Sockets = userSockets[String(student1Id)];
+    const s2Sockets = userSockets[String(student2Id)];
+    
+    if (s1Sockets) {
+      for (const sid of s1Sockets) {
+        io.to(sid).emit('session-created', payload);
+      }
+    }
+    if (s2Sockets) {
+      for (const sid of s2Sockets) {
+        io.to(sid).emit('session-created', payload);
+      }
+    }
+    
+    res.json({ session });
+  } catch (err) {
+    console.error('Error creating student game:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+ 
+
 
 app.patch('/sessions/:id', async (req, res) => {
   const { id } = req.params;
