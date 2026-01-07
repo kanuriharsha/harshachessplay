@@ -222,11 +222,8 @@ const StudentDashboard: React.FC = () => {
 
               {/* Students Tab */}
               <TabsContent value="students" className="space-y-4">
-                <div className="flex items-center justify-between mb-4">
+                <div className="mb-4">
                   <h3 className="text-lg font-semibold">Online Students</h3>
-                  <Button variant="outline" size="sm" onClick={refresh}>
-                    Refresh
-                  </Button>
                 </div>
 
                 {studentsLoading ? (

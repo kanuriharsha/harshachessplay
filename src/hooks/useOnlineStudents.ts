@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
+import { toast } from 'sonner';
 
 export interface OnlineStudent {
   id: string;
@@ -24,9 +25,9 @@ export const useOnlineStudents = () => {
   const [incomingRequests, setIncomingRequests] = useState<PlayRequest[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const fetchOnlineStudents = async () => {
+  const fetchOnlineStudents = async (silent = false) => {
     if (!user) return;
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
       const res = await fetch(`${API}/users/online?requesterId=${user.id}`);
@@ -37,7 +38,7 @@ export const useOnlineStudents = () => {
     } catch (err) {
       console.error('Failed to fetch online students:', err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -107,14 +108,15 @@ export const useOnlineStudents = () => {
   };
 
   useEffect(() => {
+    // initial load (show loader)
     fetchOnlineStudents();
     fetchIncomingRequests();
-    
-    // Poll for updates every 5 seconds
+
+    // Poll for updates (silent) every 3 seconds so UI updates without visible loaders
     const interval = setInterval(() => {
-      fetchOnlineStudents();
+      fetchOnlineStudents(true);
       fetchIncomingRequests();
-    }, 5000);
+    }, 3000);
 
     return () => clearInterval(interval);
   }, [user]);
@@ -128,6 +130,21 @@ export const useOnlineStudents = () => {
     window.addEventListener('app:play-request-received', handleNewRequest);
     return () => window.removeEventListener('app:play-request-received', handleNewRequest);
   }, []);
+
+  // Listen for rejected events for student-to-student requests and notify requester
+  useEffect(() => {
+    if (!user) return;
+    const onRejected = (e: any) => {
+      const data = e.detail;
+      if (!data) return;
+      // Only show the toast to the original requester
+      if (String(data.requesterId) === String(user.id)) {
+        toast.error(data.message || 'Play request declined');
+      }
+    };
+    window.addEventListener('app:play-request-rejected', onRejected as EventListener);
+    return () => window.removeEventListener('app:play-request-rejected', onRejected as EventListener);
+  }, [user]);
 
   return {
     students,

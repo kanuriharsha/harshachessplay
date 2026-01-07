@@ -301,14 +301,23 @@ app.patch('/play-requests/:id/respond', async (req, res) => {
       request.status = 'rejected';
       await request.save();
       
-      // Notify requester
+      // Notify requester and the target/responder (both parties)
       const requesterSockets = userSockets[String(request.studentId)];
+      const targetSockets = userSockets[String(request.targetStudentId)];
+      const payload = {
+        requestId: request._id,
+        message: 'Play request was declined',
+        requesterId: String(request.studentId),
+        targetId: String(request.targetStudentId)
+      };
       if (requesterSockets) {
         for (const sid of requesterSockets) {
-          io.to(sid).emit('play-request-rejected', {
-            requestId: request._id,
-            message: 'Your play request was declined'
-          });
+          io.to(sid).emit('play-request-rejected', payload);
+        }
+      }
+      if (targetSockets) {
+        for (const sid of targetSockets) {
+          io.to(sid).emit('play-request-rejected', payload);
         }
       }
       
@@ -395,14 +404,22 @@ app.patch('/requests/:id', async (req, res) => {
       }
     }
 
-    // If rejected, notify the student via socket (if connected)
+    // If rejected, notify both admin (responder) and the student via socket (if connected)
     if (status === 'rejected') {
       try {
         const studentId = String(request.studentId);
         const sockets = userSockets[studentId];
+        const adminId = String(req.body.adminId || 'default_admin');
+        const adminSockets = userSockets[adminId];
+        const payload = { requestId: request._id, message: 'Admin declined to play with you' };
         if (sockets) {
           for (const sid of sockets) {
-            io.to(sid).emit('request-rejected', { requestId: request._id, message: 'Admin declined to play with you' });
+            io.to(sid).emit('request-rejected', payload);
+          }
+        }
+        if (adminSockets) {
+          for (const sid of adminSockets) {
+            io.to(sid).emit('request-rejected', payload);
           }
         }
       } catch (emitErr) {
