@@ -50,16 +50,40 @@ app.post('/auth/signin', async (req, res) => {
   if ((!username && !email) || !password) return res.status(400).json({ error: 'Username/email and password required' });
 
   try {
+    // Normalize helper: remove all whitespace and lowercase
+    const normalize = (s) => (typeof s === 'string' ? s.replace(/\s+/g, '').toLowerCase() : '');
+
     let user = null;
+    // Try direct lookup first (fast path)
     if (username) {
       user = await User.findOne({ username }).exec();
     }
     if (!user && email) {
-      user = await User.findOne({ email }).exec();
+      // case-insensitive email match
+      user = await User.findOne({ email: (email || '').trim().toLowerCase() }).exec();
     }
 
-    if (!user) return res.status(400).json({ error: 'Invalid credentials' });
-    if (password !== user.password) return res.status(400).json({ error: 'Invalid credentials' });
+    // If still not found, attempt a normalized username match across users
+    if (!user && username) {
+      const all = await User.find({}).select('username email password role').exec();
+      const target = normalize(username);
+      user = all.find((u) => normalize(u.username) === target);
+    }
+
+    // If we have an email but not a direct match, also try normalized email fallback
+    if (!user && email) {
+      const all = await User.find({}).select('username email password role').exec();
+      const targetEmail = (email || '').trim().toLowerCase();
+      user = all.find((u) => (u.email || '').toLowerCase() === targetEmail);
+    }
+
+    if (!user) return res.status(400).json({ error: 'Invalid credentials. Please try with correct credentials.' });
+
+    // Compare passwords by normalizing (ignore spaces and case) to allow flexible input
+    const inputPwdNorm = normalize(password);
+    const storedPwdNorm = normalize(user.password || '');
+    if (inputPwdNorm !== storedPwdNorm) return res.status(400).json({ error: 'Invalid credentials. Please try with correct credentials.' });
+
     res.json({ user: { id: user._id, email: user.email, role: user.role, username: user.username } });
   } catch (err) {
     console.error(err);
