@@ -794,6 +794,9 @@ const socketToSession = {}; // { [socketId]: { sessionId, role } }
 // Map of userId -> Set of socketIds for direct user notifications
 const userSockets = {}; // { [userId]: Set(socketId) }
 const socketToUser = {}; // { [socketId]: userId }
+// Per-session move queues to ensure sequential processing and avoid race conditions
+const sessionMoveQueues = {}; // { [sessionId]: Array<moveData> }
+const sessionProcessing = {}; // { [sessionId]: boolean }
 
 // Helper: map a session and a role string to a userId when possible
 function getUserIdByRole(session, role) {
@@ -818,6 +821,43 @@ io.on('connection', (socket) => {
     userSockets[userId].add(socket.id);
     socketToUser[socket.id] = userId;
     console.log(`Socket ${socket.id} registered as user ${userId}`);
+    // Attempt to detect any active session for this user and reattach them
+    (async () => {
+      try {
+        const session = await GameSession.findOne({
+          status: 'active',
+          $or: [
+            { adminId: userId },
+            { studentId: userId },
+            { player1Id: userId },
+            { player2Id: userId }
+          ]
+        }).sort({ createdAt: -1 }).exec();
+        if (session) {
+          const sessionId = session._id.toString();
+          // Join the socket to the room
+          socket.join(sessionId);
+          // Update in-memory session socket mapping: prefer role-specific slots
+          if (!sessionSockets[sessionId]) sessionSockets[sessionId] = { admin: null, student: null, player1: null, player2: null, spectators: [] };
+          // Determine which slot this user occupies
+          if (String(session.adminId) === String(userId)) sessionSockets[sessionId].admin = socket.id;
+          else if (String(session.studentId) === String(userId)) sessionSockets[sessionId].student = socket.id;
+          else if (String(session.player1Id) === String(userId)) sessionSockets[sessionId].player1 = socket.id;
+          else if (String(session.player2Id) === String(userId)) sessionSockets[sessionId].player2 = socket.id;
+          socketToSession[socket.id] = { sessionId, role: null, isSpectator: false };
+
+          // Send latest authoritative session state to the reattached client
+          io.to(socket.id).emit('session-reattached', {
+            sessionId,
+            session: session,
+            message: 'Reattached to active session',
+          });
+          console.log(`Reattached user ${userId} (socket ${socket.id}) to session ${sessionId}`);
+        }
+      } catch (err) {
+        console.error('Error while attempting to reattach user on register:', err);
+      }
+    })();
   });
 
   socket.on('join-session', (data) => {
@@ -862,47 +902,57 @@ io.on('connection', (socket) => {
     socketToSession[socket.id] = { sessionId, role, isSpectator };
   });
 
-  socket.on('move', async (data) => {
-    const { sessionId, fen, turn } = data;
+  // Enqueue moves to ensure sequential processing per session and avoid race conditions
+  socket.on('move', (data) => {
+    const { sessionId } = data || {};
     const socketInfo = socketToSession[socket.id];
-    
-    // Prevent spectators from making moves
     if (socketInfo && socketInfo.isSpectator) {
       console.log('Spectator attempted to make a move - blocked');
       return;
     }
-    
-    try {
-      const session = await GameSession.findById(sessionId).exec();
-      if (session) {
-        session.fen = fen;
-        session.turn = turn;
-        
-        // Support both admin/student and player1/player2 time formats
+    if (!sessionId) return;
+    if (!sessionMoveQueues[sessionId]) sessionMoveQueues[sessionId] = [];
+    sessionMoveQueues[sessionId].push({ socketId: socket.id, data });
+    // start processing if not already
+    if (!sessionProcessing[sessionId]) processNextMove(sessionId).catch(err => console.error('processNextMove error:', err));
+  });
+
+  async function processNextMove(sessionId) {
+    if (sessionProcessing[sessionId]) return;
+    sessionProcessing[sessionId] = true;
+    while (sessionMoveQueues[sessionId] && sessionMoveQueues[sessionId].length > 0) {
+      const item = sessionMoveQueues[sessionId].shift();
+      const { data } = item || {};
+      const { fen, turn } = data || {};
+      try {
+        const session = await GameSession.findById(sessionId).exec();
+        if (!session) continue;
+        // apply authoritative update
+        if (fen !== undefined) session.fen = fen;
+        if (turn !== undefined) session.turn = turn;
         if (data.adminTimeMs !== undefined) session.adminTimeMs = data.adminTimeMs;
         if (data.studentTimeMs !== undefined) session.studentTimeMs = data.studentTimeMs;
         if (data.player1TimeMs !== undefined) session.player1TimeMs = data.player1TimeMs;
         if (data.player2TimeMs !== undefined) session.player2TimeMs = data.player2TimeMs;
-        
         session.lastMoveAt = new Date();
         await session.save();
-        
-        // Broadcast to all in room (players + spectators)
-        const payload = { 
-          fen, 
-          turn,
+
+        const payload = {
+          fen: session.fen,
+          turn: session.turn,
           adminTimeMs: session.adminTimeMs,
           studentTimeMs: session.studentTimeMs,
           player1TimeMs: session.player1TimeMs,
-          player2TimeMs: session.player2TimeMs
+          player2TimeMs: session.player2TimeMs,
         };
         if (data && data.lastMove) payload.lastMove = data.lastMove;
         io.to(sessionId).emit('game-update', payload);
+      } catch (err) {
+        console.error('Move processing error for session', sessionId, err);
       }
-    } catch (err) {
-      console.error('Move update error:', err);
     }
-  });
+    sessionProcessing[sessionId] = false;
+  }
 
   // Timer timeout from client: declare opponent the winner
   socket.on('timeout', async (data) => {
@@ -1058,11 +1108,9 @@ io.on('connection', (socket) => {
   socket.on('disconnect', async () => {
     console.log('User disconnected:', socket.id);
     const mapping = socketToSession[socket.id];
-    if (!mapping) return;
-    const { sessionId, role } = mapping;
+    const uid = socketToUser[socket.id];
 
     // Cleanup user socket registration
-    const uid = socketToUser[socket.id];
     if (uid) {
       const set = userSockets[uid];
       if (set) {
@@ -1072,44 +1120,41 @@ io.on('connection', (socket) => {
       delete socketToUser[socket.id];
     }
 
+    // If not in a session mapping, nothing more to do
+    if (!mapping) return;
+
+    const { sessionId, role } = mapping;
+
     // remove socket mapping
     if (sessionSockets[sessionId]) {
       if (sessionSockets[sessionId].admin === socket.id) sessionSockets[sessionId].admin = null;
       if (sessionSockets[sessionId].student === socket.id) sessionSockets[sessionId].student = null;
+      if (sessionSockets[sessionId].player1 === socket.id) sessionSockets[sessionId].player1 = null;
+      if (sessionSockets[sessionId].player2 === socket.id) sessionSockets[sessionId].player2 = null;
+      // remove from spectators array if present
+      if (sessionSockets[sessionId].spectators) sessionSockets[sessionId].spectators = sessionSockets[sessionId].spectators.filter(sid => sid !== socket.id);
     }
     delete socketToSession[socket.id];
 
-    // If other player still present, declare them winner and destroy session
-    const sessionMap = sessionSockets[sessionId];
-    const remainingSocketId = sessionMap ? (sessionMap.admin || sessionMap.student) : null;
     try {
       const session = await GameSession.findById(sessionId).exec();
       if (session) {
-        // If one player left (remainingSocketId exists) -> remaining player wins
-        if (remainingSocketId) {
-          // Map remaining socket to a userId if possible
-          const winnerUserId = socketToUser[remainingSocketId] || null;
-
-          // Also try to determine loser userId
-          const disconnectedUserId = socketToUser[socket.id] || null;
-
-          session.status = 'completed';
-          session.winner = winnerUserId || null;
-          await session.save();
-          io.to(sessionId).emit('game-ended', { result: 'opponent-left', winner: session.winner, winnerId: winnerUserId, loserId: disconnectedUserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id });
-          // keep session record for admin review
-        } else {
-          // No players left in room; mark session completed so admin can review later
-          session.status = session.status || 'completed';
-          await session.save();
-          console.log('Marked session completed (no players left):', session._id.toString());
-        }
+        // Do NOT conclude games on disconnect. Instead, mark the player as temporarily offline
+        // and notify remaining participants so clocks continue running on clients.
+        const disconnectedUserId = uid || null;
+        io.to(sessionId).emit('player-offline', { sessionId, disconnectedUserId, socketId: socket.id, role });
+        console.log(`Player ${disconnectedUserId || socket.id} marked offline in session ${sessionId}`);
+        // Keep session.status as 'active' so game continues. Persist a lastMoveAt if needed.
+        // Optionally set a lightweight flag on session in DB (not changing schema) by updating lastMoveAt
+        session.lastMoveAt = session.lastMoveAt || new Date();
+        await session.save();
       }
     } catch (err) {
       console.error('Error handling disconnect for session', sessionId, err);
     }
-    // cleanup sessionSockets entry
-    if (sessionSockets[sessionId] && !sessionSockets[sessionId].admin && !sessionSockets[sessionId].student) {
+
+    // cleanup empty sessionSockets entry only if no known sockets remain
+    if (sessionSockets[sessionId] && !sessionSockets[sessionId].admin && !sessionSockets[sessionId].student && !sessionSockets[sessionId].player1 && !sessionSockets[sessionId].player2 && (!sessionSockets[sessionId].spectators || sessionSockets[sessionId].spectators.length === 0)) {
       delete sessionSockets[sessionId];
     }
   });
