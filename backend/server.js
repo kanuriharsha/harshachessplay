@@ -8,9 +8,17 @@ const GameRequest = require('./models/GameRequest');
 const GameSession = require('./models/GameSession');
 
 const app = express();
-const FRONTEND_URL = process.env.FRONTEND_URL;
+// Support single or comma-separated FRONTEND_URL(s) for deployments (Vercel can have multiple)
+const FRONTEND_URL = process.env.FRONTEND_URL || process.env.FRONTEND_URLS || '';
+const allowedOrigins = (FRONTEND_URL ? FRONTEND_URL.split(',').map(s => s.trim()).filter(Boolean) : []).concat(['http://localhost:8080', 'http://127.0.0.1:8080']);
 app.use(cors({
-  origin: FRONTEND_URL ? [FRONTEND_URL, 'http://localhost:8080', 'http://127.0.0.1:8080'] : ['http://localhost:8080', 'http://127.0.0.1:8080'],
+  origin: function(origin, callback) {
+    // allow requests with no origin (e.g., curl, server-to-server)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
+    const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+    return callback(new Error(msg), false);
+  },
   credentials: true,
 }));
 app.use(express.json());
