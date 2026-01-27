@@ -20,12 +20,23 @@ interface GameSession {
   turn: 'w' | 'b';
   adminTimeMs: number;
   studentTimeMs: number;
+  player1TimeMs?: number;
+  player2TimeMs?: number;
   lastMoveAt: string | null;
   status: 'active' | 'completed' | 'timeout' | 'paused';
-  winner: 'admin' | 'student' | 'draw' | null;
+  winner: 'admin' | 'student' | 'draw' | 'player1' | 'player2' | null;
   adminIsWhite?: boolean;
   gameMode?: 'friendly' | 'serious';
   createdAt: string;
+  // Student vs Student game properties
+  player1Id?: string;
+  player2Id?: string;
+  player1IsWhite?: boolean;
+  player1Name?: string;
+  player2Name?: string;
+  adminName?: string;
+  studentName?: string;
+  winnerId?: string;
 }
 
 const Game: React.FC = () => {
@@ -48,6 +59,13 @@ const Game: React.FC = () => {
   const [gameEndDetails, setGameEndDetails] = useState<{ reason?: string; status?: string }>({});
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showDrawRequest, setShowDrawRequest] = useState(false);
+  
+  // Board snapshot history for simple undo in friendly matches
+  const [boardSnapshots, setBoardSnapshots] = useState<string[]>([]); // Array of FEN strings
+  const [canUndo, setCanUndo] = useState(false);
+  
+  // Track last applied move to prevent double application
+  const lastAppliedMoveRef = useRef<string | null>(null);
   
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const lastTickRef = useRef<number>(Date.now());
@@ -93,6 +111,17 @@ const Game: React.FC = () => {
       setStudentTime(sessionData.studentTimeMs ?? 600000);
       setPlayer1Time(sessionData.player1TimeMs ?? 600000);
       setPlayer2Time(sessionData.player2TimeMs ?? 600000);
+      
+      // Initialize board snapshots for friendly matches
+      if (sessionData.gameMode === 'friendly') {
+        const currentFen = sessionData.fen ?? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+        setBoardSnapshots([currentFen]); // Start with current position
+        setCanUndo(false); // Can't undo from initial position
+      } else {
+        setBoardSnapshots([]);
+        setCanUndo(false);
+      }
+      
       setLoading(false);
     } catch (err) {
       console.error(err);
@@ -156,6 +185,15 @@ const Game: React.FC = () => {
           }
 
           setGame(newGameState);
+        
+        // Save board snapshot for friendly matches when a move occurred
+        if (session?.gameMode === 'friendly' && data.lastMove) {
+          setBoardSnapshots(prev => {
+            const newSnapshots = [...prev, data.fen];
+            setCanUndo(newSnapshots.length > 1); // Enable undo if we have more than initial position
+            return newSnapshots;
+          });
+        }
         } catch (err) {
           // fallback: just set game
           setGame(new Chess(data.fen));
@@ -213,6 +251,9 @@ const Game: React.FC = () => {
         setGameStatus('Game drawn');
         setGameEndDetails({ reason: 'draw', status: 'Game drawn' });
         setIsAnalyzing(false); // Reset analyze mode when new game ends
+        // Clear board snapshots when game ends
+        setBoardSnapshots([]);
+        setCanUndo(false);
       } else {
         setGameResult(didIWin ? 'win' : 'lose');
         let status = '';
@@ -230,6 +271,9 @@ const Game: React.FC = () => {
         setGameStatus(status);
         setGameEndDetails({ reason, status });
         setIsAnalyzing(false); // Reset analyze mode when new game ends
+        // Clear board snapshots when game ends
+        setBoardSnapshots([]);
+        setCanUndo(false);
       }
     };
 
@@ -244,7 +288,6 @@ const Game: React.FC = () => {
       // Update chess game state
       const newGame = new Chess(data.session.fen);
       setGame(newGame);
-      setCurrentTurn(data.session.turn);
       
       // Update timers with server values
       if (data.session.player1TimeMs !== undefined) setPlayer1Time(data.session.player1TimeMs);
@@ -255,7 +298,7 @@ const Game: React.FC = () => {
       // Resume timer if game is still active
       if (data.session.status === 'active') {
         if (timerRef.current) clearInterval(timerRef.current);
-        startTimer();
+        // Timer will be restarted by the useEffect dependency on session.status
       }
       
       toast.success('Reconnected to game!');
@@ -557,6 +600,12 @@ const Game: React.FC = () => {
 
       // Apply confirmed move locally now (timers will switch because game.turn() changes)
       setGame(newGame);
+      
+      // Track this move to prevent duplicate application when server confirms
+      if (move) {
+        const moveId = `${move.from}${move.to}${newGame.fen()}`;
+        lastAppliedMoveRef.current = moveId;
+      }
 
       // Emit real-time update via SocketProvider
       // Include the last move so remote clients can highlight it even when
@@ -590,20 +639,41 @@ const Game: React.FC = () => {
   }, [game, session, role, adminTime, studentTime, player1Time, player2Time, user?.id]);
 
   const handleUndo = useCallback(async () => {
-    if (!session || !prevFen) return;
+    if (!session || session.gameMode !== 'friendly' || role !== 'admin' || boardSnapshots.length <= 1) {
+      return; // Can only undo in friendly matches as admin with moves to undo
+    }
+    
     try {
-      setGame(new Chess(prevFen));
-      // clear prevFen so repeated undo won't reapply
-      setPrevFen(null);
-      socket.sendUndo({ sessionId: session._id, fen: prevFen });
+      // Remove the last snapshot (current position)
+      const newSnapshots = [...boardSnapshots];
+      newSnapshots.pop();
+      
+      if (newSnapshots.length === 0) {
+        // Should not happen, but safety check
+        return;
+      }
+      
+      // Get the new last snapshot (previous position)
+      const previousFen = newSnapshots[newSnapshots.length - 1];
+      
+      // Update local game state
+      setGame(new Chess(previousFen));
+      setBoardSnapshots(newSnapshots);
+      setCanUndo(newSnapshots.length > 1); // Can undo if more than initial position remains
+      
+      // Send undo to server and other clients
+      socket.sendUndo({ sessionId: session._id, fen: previousFen });
+      
+      toast.success('Move undone');
     } catch (err) {
       console.error('Undo failed', err);
+      toast.error('Failed to undo move');
     }
-  }, [session, prevFen, socket]);
+  }, [session, boardSnapshots, role, socket]);
 
   const handleResign = async () => {
     if (!session) return;
-    socket.sendResign({ sessionId: session._id, resignerRole: role });
+    socket.sendResign(session._id, role);
     // wait for server to emit final result
     toast.info('You resigned — waiting for server confirmation');
     if (timerRef.current) clearInterval(timerRef.current);
@@ -642,7 +712,7 @@ const Game: React.FC = () => {
     // If game is active, send resign to end it for both players, then navigate
     if (session && session.status === 'active') {
       try {
-        socket.sendResign({ sessionId: session._id, resignerRole: role });
+        socket.sendResign(session._id, role);
       } catch (err) {
         console.error('Error sending resign before navigating back', err);
       }
@@ -694,8 +764,8 @@ const Game: React.FC = () => {
   const isStudentVsStudent = !!(session.player1Id && session.player2Id);
   const myId = user?.id;
 
-  let playerColor = 'white';
-  let opponentColor = 'black';
+  let playerColor: 'white' | 'black' = 'white';
+  let opponentColor: 'white' | 'black' = 'black';
   let isPlayerTurn = false;
   let myName = user?.username || 'You';
   let opponentName = 'Opponent';
@@ -775,10 +845,20 @@ const Game: React.FC = () => {
                   variant="outline"
                   size="sm"
                   onClick={handleUndo}
-                  disabled={!prevFen}
+                  disabled={!canUndo}
                   className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
                 >
                   Undo Move
+                </Button>
+              )}
+              {session?.status === 'completed' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleAnalyzeBoard}
+                  className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
+                >
+                  Analyze Board
                 </Button>
               )}
               <Button
@@ -789,6 +869,26 @@ const Game: React.FC = () => {
               >
                 <Flag className="w-4 h-4" />
                 Resign
+              </Button>
+            </>
+          ) : isAnalyzing ? (
+            <>
+              {/* <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsAnalyzing(false)}
+                className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
+              >
+                Exit Analysis
+              </Button> */}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleBackToDashboard}
+                className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Back to Dashboard
               </Button>
             </>
           ) : (
