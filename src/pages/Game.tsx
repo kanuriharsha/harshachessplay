@@ -851,16 +851,6 @@ const Game: React.FC = () => {
                   Undo Move
                 </Button>
               )}
-              {session?.status === 'completed' && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleAnalyzeBoard}
-                  className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
-                >
-                  Analyze Board
-                </Button>
-              )}
               <Button
                 variant="destructive"
                 size="sm"
@@ -893,15 +883,28 @@ const Game: React.FC = () => {
               
             </>
           ) : (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleBackToDashboard}
-              className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              Back to Dashboard
-            </Button>
+            <>
+              {/* Show Analyze Board option when game is completed */}
+              {session?.status === 'completed' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleAnalyzeBoard}
+                  className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
+                >
+                  Analyze Board
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleBackToDashboard}
+                className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Back to Dashboard
+              </Button>
+            </>
           )}
         </div>
       </div>
