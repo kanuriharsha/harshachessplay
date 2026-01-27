@@ -1,13 +1,19 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Trophy, Frown, Handshake, Sparkles } from 'lucide-react';
+import { Trophy, Frown, Handshake, Sparkles, Info, X, ChevronDown, ChevronUp, Eye } from 'lucide-react';
 
 interface EndGameModalProps {
   result: 'win' | 'lose' | 'draw' | null;
   onGoBack: () => void;
+  gameStatus?: string;
+  lastMove?: { from: string; to: string } | null;
+  gameEndReason?: 'checkmate' | 'timeout' | 'resign' | 'draw' | 'stalemate' | null;
+  onAnalyze?: () => void;
 }
 
-export const EndGameModal: React.FC<EndGameModalProps> = ({ result, onGoBack }) => {
+export const EndGameModal: React.FC<EndGameModalProps> = ({ result, onGoBack, gameStatus, lastMove, gameEndReason, onAnalyze }) => {
+  const [showInfo, setShowInfo] = useState(false);
+
   useEffect(() => {
     if (!result) return;
     let audio: HTMLAudioElement | null = null;
@@ -118,11 +124,47 @@ export const EndGameModal: React.FC<EndGameModalProps> = ({ result, onGoBack }) 
           </h2>
         )}
         
-        <p className="text-sm sm:text-base md:text-lg lg:text-xl text-gray-200 text-center mb-8 sm:mb-10 md:mb-12 px-2 sm:px-4 leading-relaxed">
+        <p className="text-sm sm:text-base md:text-lg lg:text-xl text-gray-200 text-center mb-4 sm:mb-6 md:mb-8 px-2 sm:px-4 leading-relaxed">
           {content.message}
         </p>
         
+        {/* Quick game info display */}
+        {(gameStatus || gameEndReason || lastMove) && (
+          <div className="mb-6 sm:mb-8 p-3 sm:p-4 bg-black/20 backdrop-blur-sm rounded-xl border border-white/10 text-white/80 text-sm space-y-2">
+            {gameEndReason && (
+              <div className="flex justify-between items-center">
+                <span className="font-medium">End Reason:</span>
+                <span className="capitalize">
+                  {gameEndReason === 'checkmate' ? 'Checkmate' :
+                   gameEndReason === 'timeout' ? 'Time Expired' :
+                   gameEndReason === 'resign' ? 'Resignation' :
+                   gameEndReason === 'draw' ? 'Draw Agreed' :
+                   gameEndReason === 'stalemate' ? 'Stalemate' : gameEndReason}
+                </span>
+              </div>
+            )}
+            {lastMove && (
+              <div className="flex justify-between items-center">
+                <span className="font-medium">Final Move:</span>
+                <span className="font-mono text-yellow-300">
+                  {lastMove.from.toUpperCase()} → {lastMove.to.toUpperCase()}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+        
         <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 md:gap-5">
+          {onAnalyze && (
+            <Button
+              onClick={onAnalyze}
+              size="lg"
+              className="flex-1 text-base sm:text-lg md:text-xl font-bold py-5 sm:py-6 md:py-7 lg:py-8 bg-gradient-to-r from-purple-600 to-indigo-700 hover:from-purple-700 hover:to-indigo-800 text-white shadow-lg hover:shadow-2xl hover:scale-105 transition-all duration-300 rounded-xl border-2 border-purple-400/30 flex items-center justify-center gap-2"
+            >
+              <Eye className="w-5 h-5 sm:w-6 sm:h-6" />
+              Analyze Board
+            </Button>
+          )}
           <Button
             onClick={onGoBack}
             size="lg"

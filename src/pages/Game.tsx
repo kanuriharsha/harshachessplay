@@ -45,6 +45,8 @@ const Game: React.FC = () => {
   const location = useLocation();
   const [isSpectator, setIsSpectator] = useState(false);
   const [gameResult, setGameResult] = useState<'win' | 'lose' | 'draw' | null>(null);
+  const [gameEndDetails, setGameEndDetails] = useState<{ reason?: string; status?: string }>({});
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showDrawRequest, setShowDrawRequest] = useState(false);
   
   const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -209,12 +211,65 @@ const Game: React.FC = () => {
       if (data.result === 'draw') {
         setGameResult('draw');
         setGameStatus('Game drawn');
+        setGameEndDetails({ reason: 'draw', status: 'Game drawn' });
+        setIsAnalyzing(false); // Reset analyze mode when new game ends
       } else {
         setGameResult(didIWin ? 'win' : 'lose');
-        if (data.result === 'timeout') setGameStatus(didIWin ? 'You won on time!' : 'You lost on time!');
-        else if (data.result === 'resign') setGameStatus(didIWin ? 'You won by resignation!' : 'Opponent won by resignation');
-        else setGameStatus(didIWin ? 'You won!' : 'You lost!');
+        let status = '';
+        let reason = '';
+        if (data.result === 'timeout') {
+          status = didIWin ? 'You won on time!' : 'You lost on time!';
+          reason = 'timeout';
+        } else if (data.result === 'resign') {
+          status = didIWin ? 'You won by resignation!' : 'Opponent won by resignation';
+          reason = 'resign';
+        } else {
+          status = didIWin ? 'You won!' : 'You lost!';
+          reason = 'checkmate';
+        }
+        setGameStatus(status);
+        setGameEndDetails({ reason, status });
+        setIsAnalyzing(false); // Reset analyze mode when new game ends
       }
+    };
+
+    const onSessionReattached = (e: any) => {
+      const data = e.detail;
+      if (!data || !data.session) return;
+      console.log('Reattached to session:', data);
+      
+      // Update session state with authoritative server state
+      setSession(data.session);
+      
+      // Update chess game state
+      const newGame = new Chess(data.session.fen);
+      setGame(newGame);
+      setCurrentTurn(data.session.turn);
+      
+      // Update timers with server values
+      if (data.session.player1TimeMs !== undefined) setPlayer1Time(data.session.player1TimeMs);
+      if (data.session.player2TimeMs !== undefined) setPlayer2Time(data.session.player2TimeMs);
+      if (data.session.adminTimeMs !== undefined) setAdminTime(data.session.adminTimeMs);
+      if (data.session.studentTimeMs !== undefined) setStudentTime(data.session.studentTimeMs);
+      
+      // Resume timer if game is still active
+      if (data.session.status === 'active') {
+        if (timerRef.current) clearInterval(timerRef.current);
+        startTimer();
+      }
+      
+      toast.success('Reconnected to game!');
+    };
+
+    const onPlayerOffline = (e: any) => {
+      const data = e.detail;
+      if (!data) return;
+      
+      // Show subtle notification that opponent went offline
+      // Don't end the game - just notify
+      toast.info(`Player went offline. Game continues...`, {
+        duration: 3000,
+      });
     };
 
 
@@ -223,12 +278,16 @@ const Game: React.FC = () => {
     window.addEventListener('app:draw-request', onDrawRequest as EventListener);
     window.addEventListener('app:draw-declined', onDrawDeclined as EventListener);
     window.addEventListener('app:game-ended', onGameEnded as EventListener);
+    window.addEventListener('app:session-reattached', onSessionReattached as EventListener);
+    window.addEventListener('app:player-offline', onPlayerOffline as EventListener);
 
     return () => {
       window.removeEventListener('app:game-update', onGameUpdate as EventListener);
       window.removeEventListener('app:draw-request', onDrawRequest as EventListener);
       window.removeEventListener('app:draw-declined', onDrawDeclined as EventListener);
       window.removeEventListener('app:game-ended', onGameEnded as EventListener);
+      window.removeEventListener('app:session-reattached', onSessionReattached as EventListener);
+      window.removeEventListener('app:player-offline', onPlayerOffline as EventListener);
     };
   }, [adminTime, studentTime, role, fetchSession, game]);
 
@@ -577,6 +636,8 @@ const Game: React.FC = () => {
     // CRITICAL: Clear modal state FIRST to ensure single-click close behavior
     setGameResult(null);
     setGameStatus('');
+    setGameEndDetails({});
+    setIsAnalyzing(false);
     
     // If game is active, send resign to end it for both players, then navigate
     if (session && session.status === 'active') {
@@ -591,6 +652,15 @@ const Game: React.FC = () => {
     setTimeout(() => {
       navigate(role === 'admin' ? '/admin' : '/student');
     }, 0);
+  };
+
+  const handleAnalyzeBoard = () => {
+    // Close the modal so user can see the board with final position
+    setGameResult(null);
+    // Set analyze mode to show only Go Back button
+    setIsAnalyzing(true);
+    // Keep the session state so board remains visible with final position
+    // Don't navigate away - just close the modal
   };
 
   const formatTime = (ms: number) => {
@@ -689,7 +759,7 @@ const Game: React.FC = () => {
 
         {/* Controls - Responsive buttons */}
         <div className="flex flex-col sm:flex-row justify-center gap-2 sm:gap-3 py-2">
-          {isGameActive ? (
+          {isGameActive && !isAnalyzing ? (
             <>
               <Button
                 variant="outline"
@@ -739,6 +809,10 @@ const Game: React.FC = () => {
       <EndGameModal
         result={gameResult}
         onGoBack={handleBackToDashboard}
+        onAnalyze={handleAnalyzeBoard}
+        gameStatus={gameEndDetails.status}
+        lastMove={remoteLastMove}
+        gameEndReason={gameEndDetails.reason as any}
       />
 
       {/* Draw Request Modal */}

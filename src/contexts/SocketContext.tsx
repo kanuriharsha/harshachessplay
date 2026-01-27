@@ -84,6 +84,24 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
     });
 
+    socket.on('session-reattached', (data: any) => {
+      try {
+        console.log('Session reattached:', data);
+        window.dispatchEvent(new CustomEvent('app:session-reattached', { detail: data }));
+      } catch (err) {
+        console.error('Error handling session-reattached', err);
+      }
+    });
+
+    socket.on('player-offline', (data: any) => {
+      try {
+        console.log('Player went offline:', data);
+        window.dispatchEvent(new CustomEvent('app:player-offline', { detail: data }));
+      } catch (err) {
+        console.error('Error handling player-offline', err);
+      }
+    });
+
     socket.on('draw-declined', () => {
       window.dispatchEvent(new CustomEvent('app:draw-declined'));
     });
