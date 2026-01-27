@@ -660,7 +660,7 @@ const Game: React.FC = () => {
       setGame(new Chess(previousFen));
       setBoardSnapshots(newSnapshots);
       setCanUndo(newSnapshots.length > 1); // Can undo if more than initial position remains
-      
+      //ok
       // Send undo to server and other clients
       socket.sendUndo({ sessionId: session._id, fen: previousFen });
       
@@ -889,7 +889,8 @@ const Game: React.FC = () => {
               >
                 <ArrowLeft className="w-4 h-4" />
                 Back to Dashboard
-              </Button>
+              </Button> 
+              
             </>
           ) : (
             <Button
