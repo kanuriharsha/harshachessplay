@@ -625,7 +625,7 @@ const Game: React.FC = () => {
       // If the game finished (checkmate/draw), notify server to broadcast game-ended
       if (status === 'completed') {
         try {
-          socket.sendGameEnded({ sessionId: session._id, result: newGame.isDraw() ? 'draw' : 'checkmate', winner });
+          socket.sendGameEnded({ sessionId: session._id, result: newGame.isDraw() ? 'draw' : 'checkmate', winner, fen: newGame.fen() });
         } catch (err) {
           console.error('Failed to send game-ended event', err);
         }

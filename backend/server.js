@@ -6,11 +6,12 @@ const mongoose = require('mongoose');
 const User = require('./models/User');
 const GameRequest = require('./models/GameRequest');
 const GameSession = require('./models/GameSession');
+const { Chess } = require('chess.js');
 
 const app = express();
 // Support single or comma-separated FRONTEND_URL(s) for deployments (Vercel can have multiple)
 const FRONTEND_URL = process.env.FRONTEND_URL || process.env.FRONTEND_URLS || '';
-const allowedOrigins = (FRONTEND_URL ? FRONTEND_URL.split(',').map(s => s.trim()).filter(Boolean) : []).concat(['http://localhost:8080', 'http://127.0.0.1:8080']);
+const allowedOrigins = (FRONTEND_URL ? FRONTEND_URL.split(',').map(s => s.trim()).filter(Boolean) : []).concat(['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:8081', 'http://127.0.0.1:8081']);
 app.use(cors({
   origin: function(origin, callback) {
     // allow requests with no origin (e.g., curl, server-to-server)
@@ -790,7 +791,7 @@ const server = app.listen(PORT, () => console.log(`Server running on port ${PORT
 const { Server: IOServer } = require('socket.io');
 const io = new IOServer(server, {
   cors: {
-    origin: FRONTEND_URL ? [FRONTEND_URL, 'http://localhost:8080', 'http://127.0.0.1:8080'] : ['http://localhost:8080', 'http://127.0.0.1:8080'],
+    origin: FRONTEND_URL ? [FRONTEND_URL, 'http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:8081', 'http://127.0.0.1:8081'] : ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://localhost:8081', 'http://127.0.0.1:8081'],
     methods: ['GET', 'POST'],
     credentials: true,
   }
@@ -1092,6 +1093,53 @@ io.on('connection', (socket) => {
     try {
       const session = await GameSession.findById(sessionId).exec();
       if (!session) return;
+      // If the client claims checkmate, validate it server-side by testing all legal moves
+      if (result === 'checkmate') {
+        const fenToCheck = (data && data.fen) || session.fen || null;
+        if (!fenToCheck) {
+          // no FEN to validate against; reject the claim
+          console.warn('Received checkmate claim without FEN for session', sessionId);
+          return;
+        }
+
+        const chess = new Chess(fenToCheck);
+        // Only proceed to finalize if position is indeed a check for side to move
+        if (!chess.isCheck()) {
+          console.warn('Received checkmate claim but side to move is not in check for session', sessionId);
+          return;
+        }
+
+        // Generate all legal moves for the side to move and test whether any move removes the check
+        const legalMoves = chess.moves({ verbose: true }) || [];
+        let escapeFound = false;
+        for (const mv of legalMoves) {
+          try {
+            const test = new Chess(fenToCheck);
+            const promotion = mv.promotion || 'q';
+            const made = test.move({ from: mv.from, to: mv.to, promotion });
+            if (!made) continue;
+            if (!test.isCheck()) {
+              escapeFound = true;
+              break;
+            }
+          } catch (e) {
+            // ignore move application errors and continue testing others
+            continue;
+          }
+        }
+
+        if (escapeFound) {
+          // Not a checkmate — client reported checkmate but an escaping move exists
+          console.warn('Client reported checkmate but an escaping move exists for session', sessionId);
+          // Optionally notify the reporting client that the claim was rejected
+          io.to(socket.id).emit('game-ended-invalid', { reason: 'not_checkmate', sessionId });
+          return;
+        }
+
+        // All legal moves leave the king in check -> valid checkmate, fall through to finalize below
+      }
+
+      // Finalize the session (draw/resign/validated checkmate/etc.)
       session.status = 'completed';
       // Normalize winner: could be a role ('admin','student','player1','player2') or a userId
       let winnerId = null;
