@@ -46,6 +46,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     from: string;
     to: string;
     isCapture: boolean;
+    pieceColor: 'w' | 'b';
   } | null>(null);
 
   // Keep lastMove in sync with the external `game` prop so both players
@@ -111,9 +112,9 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
         piece.type === 'p' && 
         ((piece.color === 'w' && square[1] === '8') || (piece.color === 'b' && square[1] === '1'));
 
-      if (isPromotion) {
+      if (isPromotion && piece) {
         // Show promotion modal instead of making the move immediately
-        setPromotionPending({ from: selectedSquare, to: square, isCapture });
+        setPromotionPending({ from: selectedSquare, to: square, isCapture, pieceColor: piece.color });
         return;
       }
 
@@ -263,7 +264,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
       {/* Promotion Modal */}
       {promotionPending && (
         <PromotionModal
-          color={game.turn() === 'w' ? 'white' : 'black'}
+          color={promotionPending.pieceColor === 'w' ? 'white' : 'black'}
           position={{ file: promotionPending.to[0], rank: promotionPending.to[1] }}
           onSelect={handlePromotionSelect}
           onCancel={handlePromotionCancel}
