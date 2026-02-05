@@ -58,10 +58,10 @@ export const GameContainer: React.FC<GameContainerProps> = ({
     return () => clearInterval(interval);
   }, [currentTurn, isGameActive]);
 
-  const handleMove = useCallback((from: string, to: string) => {
+  const handleMove = useCallback((from: string, to: string, promotion?: string) => {
     try {
       const newGame = new Chess(game.fen());
-      const move = newGame.move({ from, to, promotion: 'q' });
+      const move = newGame.move({ from, to, promotion: promotion || 'q' });
       
       if (move) {
         setGame(newGame);

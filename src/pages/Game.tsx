@@ -503,7 +503,7 @@ const Game: React.FC = () => {
     }
   };
 
-  const handleMove = useCallback(async (from: string, to: string) => {
+  const handleMove = useCallback(async (from: string, to: string, promotion?: string) => {
     if (!session || session.status !== 'active') return false;
 
     // Validate it's this player's turn based on piece color
@@ -531,7 +531,7 @@ const Game: React.FC = () => {
       // store previous fen to allow undo (friendly mode)
       setPrevFen(game.fen());
       const newGame = new Chess(game.fen());
-      const move = newGame.move({ from, to, promotion: 'q' });
+      const move = newGame.move({ from, to, promotion: promotion || 'q' });
 
       if (!move) return false;
 

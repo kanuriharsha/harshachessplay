@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { Chess, Square } from 'chess.js';
 import { getPieceComponent } from './ChessPieces';
+import { PromotionModal } from './PromotionModal';
 import { cn } from '@/lib/utils';
 
 interface ChessBoardProps {
@@ -41,6 +42,11 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   const [legalMoves, setLegalMoves] = useState<string[]>([]);
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
   const [hoveredSquare, setHoveredSquare] = useState<string | null>(null);
+  const [promotionPending, setPromotionPending] = useState<{
+    from: string;
+    to: string;
+    isCapture: boolean;
+  } | null>(null);
 
   // Keep lastMove in sync with the external `game` prop so both players
   // (with different orientations) highlight the same recent move.
@@ -99,6 +105,18 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
       const moveObj: any = movesVerbose.find((m: any) => m.to === square);
       const isCapture = !!(moveObj && (moveObj.captured || (moveObj.flags && moveObj.flags.includes('e'))));
 
+      // Check if this is a pawn promotion
+      const piece = game.get(selectedSquare as Square);
+      const isPromotion = piece && 
+        piece.type === 'p' && 
+        ((piece.color === 'w' && square[1] === '8') || (piece.color === 'b' && square[1] === '1'));
+
+      if (isPromotion) {
+        // Show promotion modal instead of making the move immediately
+        setPromotionPending({ from: selectedSquare, to: square, isCapture });
+        return;
+      }
+
       const moveResult = await onMove(selectedSquare, square);
       if (moveResult) {
         setLastMove({ from: selectedSquare, to: square });
@@ -139,6 +157,27 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     if (!isLegalMove(square)) return false;
     const piece = game.get(square as Square);
     return piece !== null;
+  };
+
+  const handlePromotionSelect = async (promotionPiece: 'q' | 'n' | 'r' | 'b') => {
+    if (!promotionPending) return;
+
+    const { from, to, isCapture } = promotionPending;
+    const moveResult = await onMove(from, to, promotionPiece);
+    
+    if (moveResult) {
+      setLastMove({ from, to });
+      playSound(isCapture ? 'capture' : 'move');
+    }
+    
+    setPromotionPending(null);
+    setSelectedSquare(null);
+    setLegalMoves([]);
+  };
+
+  const handlePromotionCancel = () => {
+    setPromotionPending(null);
+    // Keep the piece selected so user can try a different move
   };
 
   return (
@@ -220,6 +259,16 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
           )}
         </div>
       </div>
+      
+      {/* Promotion Modal */}
+      {promotionPending && (
+        <PromotionModal
+          color={game.turn() === 'w' ? 'white' : 'black'}
+          position={{ file: promotionPending.to[0], rank: promotionPending.to[1] }}
+          onSelect={handlePromotionSelect}
+          onCancel={handlePromotionCancel}
+        />
+      )}
     </div>
   );
 };
