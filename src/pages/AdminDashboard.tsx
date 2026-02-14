@@ -92,11 +92,13 @@ const AdminDashboard: React.FC = () => {
     }
   }, [user, role, authLoading, navigate]);
 
-  useEffect(() => {
-    if (activeSession) {
-      navigate('/game');
-    }
-  }, [activeSession, navigate]);
+  // REMOVED auto-redirect to game - Admin can now access dashboard while having active game
+  // This allows them to spectate other games without abandoning their own game
+  // useEffect(() => {
+  //   if (activeSession) {
+  //     navigate('/game');
+  //   }
+  // }, [activeSession, navigate]);
 
   // Fetch users
   const fetchUsers = async () => {
@@ -507,6 +509,36 @@ const AdminDashboard: React.FC = () => {
             {mobileMenuOpen ? 'Close Menu' : 'Menu'}
           </Button>
         </div>
+
+        {/* Active Game Indicator - Shows when admin has an active game */}
+        {activeSession && (
+          <div className="mb-6">
+            <Card className="border-primary/50 bg-primary/5">
+              <CardContent className="py-4">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center">
+                      <Gamepad2 className="w-5 h-5 text-primary" />
+                    </div>
+                    <div>
+                      <p className="font-semibold text-sm">You have an active game</p>
+                      <p className="text-xs text-muted-foreground">
+                        Game in progress - You can spectate other games and return to your game anytime
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    onClick={() => navigate('/game')}
+                    className="gap-2 w-full sm:w-auto"
+                  >
+                    <Gamepad2 className="w-4 h-4" />
+                    Return to My Game
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
 
         {/* Main Tabs */}
         <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-6">

@@ -11,6 +11,7 @@ import { Flag, ArrowLeft, Loader2, Handshake } from 'lucide-react';
 import { EndGameModal } from '@/components/chess/EndGameModal';
 import { DrawRequestModal } from '@/components/chess/DrawRequestModal';
 import { useSocket } from '@/contexts/SocketContext';
+import { useSpectatorSocket } from '@/hooks/useSpectatorSocket';
 
 interface GameSession {
   _id: string;
@@ -69,7 +70,13 @@ const Game: React.FC = () => {
   
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const lastTickRef = useRef<number>(Date.now());
+  
+  // Use regular player socket for active games (for sending moves/commands)
   const socket = useSocket();
+  
+  // Use separate spectator socket for spectating (only initialized when spectating)
+  // This creates a completely isolated socket connection that doesn't interfere with active games
+  const spectatorSocket = useSpectatorSocket(isSpectator ? session?._id || null : null);
 
   // Fetch active session
   const fetchSession = useCallback(async () => {
@@ -139,10 +146,11 @@ const Game: React.FC = () => {
   }, [user, authLoading, navigate, fetchSession]);
 
   // Ensure we join the socket room for this session so we receive events
+  // When spectating, the spectatorSocket handles the join automatically
   useEffect(() => {
-    if (session?._id) {
+    if (session?._id && !isSpectator) {
       try {
-        socket.joinSession(session._id, isSpectator);
+        socket.joinSession(session._id, false);
       } catch (err) {
         console.error('Failed to join session via socket', err);
       }
@@ -154,6 +162,13 @@ const Game: React.FC = () => {
     const onGameUpdate = (e: any) => {
       const data = e.detail;
       if (!data) return;
+      
+      // CRITICAL: Filter events by session ID to prevent cross-contamination
+      // This ensures spectated games don't interfere with active games
+      if (session && data.sessionId && data.sessionId !== session._id) {
+        return; // Ignore events from other sessions
+      }
+      
       // If we received a remote move, play move/capture sound for both players.
       if (data.fen) {
         try {
@@ -211,9 +226,23 @@ const Game: React.FC = () => {
       }
     };
 
-    const onDrawRequest = () => setShowDrawRequest(true);
+    const onDrawRequest = (e: any) => {
+      const data = e.detail;
+      // Filter by session ID
+      if (session && data && data.sessionId && data.sessionId !== session._id) {
+        return;
+      }
+      setShowDrawRequest(true);
+    };
 
-    const onDrawDeclined = () => toast.info('Opponent declined the draw');
+    const onDrawDeclined = (e: any) => {
+      const data = e.detail;
+      // Filter by session ID
+      if (session && data && data.sessionId && data.sessionId !== session._id) {
+        return;
+      }
+      toast.info('Opponent declined the draw');
+    };
 
     const endHandledRef = (window as any).__endHandledRef || { current: {} };
     (window as any).__endHandledRef = endHandledRef;
@@ -221,6 +250,12 @@ const Game: React.FC = () => {
     const onGameEnded = (e: any) => {
       const data = e.detail;
       if (!data || !data.sessionId) return;
+      
+      // CRITICAL: Filter by session ID to prevent spectated game endings from affecting active game
+      if (session && data.sessionId !== session._id) {
+        return; // Ignore game-ended events from other sessions
+      }
+      
       // prevent duplicate handling for same session
       if (endHandledRef.current[data.sessionId]) return;
       endHandledRef.current[data.sessionId] = true;
@@ -280,6 +315,12 @@ const Game: React.FC = () => {
     const onSessionReattached = (e: any) => {
       const data = e.detail;
       if (!data || !data.session) return;
+      
+      // Filter by session ID
+      if (session && data.session._id && data.session._id !== session._id) {
+        return;
+      }
+      
       console.log('Reattached to session:', data);
       
       // Update session state with authoritative server state
@@ -315,28 +356,74 @@ const Game: React.FC = () => {
       });
     };
 
+    // Use different event mechanisms based on mode:
+    // - When PLAYING: Use global window events from SocketContext
+    // - When SPECTATING: Use spectator socket's direct event handlers (isolated connection)
+    
+    if (isSpectator && spectatorSocket.connected) {
+      // SPECTATOR MODE: Use isolated spectator socket events
+      console.log('[Game] Setting up spectator socket event handlers');
+      
+      spectatorSocket.on('game-update', (data: any) => {
+        onGameUpdate({ detail: data });
+      });
+      
+      spectatorSocket.on('draw-request-received', (data: any) => {
+        onDrawRequest({ detail: data });
+      });
+      
+      spectatorSocket.on('draw-declined', (data: any) => {
+        onDrawDeclined({ detail: data });
+      });
+      
+      spectatorSocket.on('game-ended', (data: any) => {
+        onGameEnded({ detail: data });
+      });
+      
+      spectatorSocket.on('session-reattached', (data: any) => {
+        onSessionReattached({ detail: data });
+      });
+      
+      spectatorSocket.on('player-offline', (data: any) => {
+        onPlayerOffline({ detail: data });
+      });
+      
+      return () => {
+        console.log('[Game] Cleaning up spectator socket event handlers');
+        spectatorSocket.off('game-update');
+        spectatorSocket.off('draw-request-received');
+        spectatorSocket.off('draw-declined');
+        spectatorSocket.off('game-ended');
+        spectatorSocket.off('session-reattached');
+        spectatorSocket.off('player-offline');
+      };
+    } else if (!isSpectator) {
+      // PLAYER MODE: Use global window events (doesn't interfere with spectating)
+      console.log('[Game] Setting up player window event listeners');
+      
+      window.addEventListener('app:game-update', onGameUpdate as EventListener);
+      window.addEventListener('app:draw-request', onDrawRequest as EventListener);
+      window.addEventListener('app:draw-declined', onDrawDeclined as EventListener);
+      window.addEventListener('app:game-ended', onGameEnded as EventListener);
+      window.addEventListener('app:session-reattached', onSessionReattached as EventListener);
+      window.addEventListener('app:player-offline', onPlayerOffline as EventListener);
 
-
-    window.addEventListener('app:game-update', onGameUpdate as EventListener);
-    window.addEventListener('app:draw-request', onDrawRequest as EventListener);
-    window.addEventListener('app:draw-declined', onDrawDeclined as EventListener);
-    window.addEventListener('app:game-ended', onGameEnded as EventListener);
-    window.addEventListener('app:session-reattached', onSessionReattached as EventListener);
-    window.addEventListener('app:player-offline', onPlayerOffline as EventListener);
-
-    return () => {
-      window.removeEventListener('app:game-update', onGameUpdate as EventListener);
-      window.removeEventListener('app:draw-request', onDrawRequest as EventListener);
-      window.removeEventListener('app:draw-declined', onDrawDeclined as EventListener);
-      window.removeEventListener('app:game-ended', onGameEnded as EventListener);
-      window.removeEventListener('app:session-reattached', onSessionReattached as EventListener);
-      window.removeEventListener('app:player-offline', onPlayerOffline as EventListener);
-    };
-  }, [adminTime, studentTime, role, fetchSession, game]);
+      return () => {
+        console.log('[Game] Cleaning up player window event listeners');
+        window.removeEventListener('app:game-update', onGameUpdate as EventListener);
+        window.removeEventListener('app:draw-request', onDrawRequest as EventListener);
+        window.removeEventListener('app:draw-declined', onDrawDeclined as EventListener);
+        window.removeEventListener('app:game-ended', onGameEnded as EventListener);
+        window.removeEventListener('app:session-reattached', onSessionReattached as EventListener);
+        window.removeEventListener('app:player-offline', onPlayerOffline as EventListener);
+      };
+    }
+  }, [adminTime, studentTime, role, fetchSession, game, isSpectator, spectatorSocket, session]);
 
   // Polling for game updates
+  // Only poll for non-spectator games since spectators get real-time updates via socket
   useEffect(() => {
-    if (!session) return;
+    if (!session || isSpectator) return;
 
     const interval = setInterval(async () => {
       try {
@@ -346,6 +433,7 @@ const Game: React.FC = () => {
           const body = await res.json();
           const updated = body.session as GameSession | null;
           if (!updated) return;
+          // CRITICAL: Only update if this is the same session we're currently viewing
           if (updated._id && session && updated._id === session._id) {
             setSession(updated);
             setGame(new Chess(updated.fen));
@@ -395,7 +483,7 @@ const Game: React.FC = () => {
     }, 2000); // Poll every 2 seconds
 
     return () => clearInterval(interval);
-  }, [session?._id]);
+  }, [session?._id, isSpectator, user?.id]);
 
   // Chess clock logic
   useEffect(() => {
@@ -504,6 +592,12 @@ const Game: React.FC = () => {
   };
 
   const handleMove = useCallback(async (from: string, to: string, promotion?: string) => {
+    // CRITICAL: Prevent spectators from making moves
+    if (isSpectator) {
+      toast.error("Spectators cannot make moves");
+      return false;
+    }
+    
     if (!session || session.status !== 'active') return false;
 
     // Validate it's this player's turn based on piece color
@@ -639,6 +733,10 @@ const Game: React.FC = () => {
   }, [game, session, role, adminTime, studentTime, player1Time, player2Time, user?.id]);
 
   const handleUndo = useCallback(async () => {
+    if (isSpectator) {
+      toast.error("Spectators cannot undo moves");
+      return;
+    }
     if (!session || session.gameMode !== 'friendly' || role !== 'admin' || boardSnapshots.length <= 1) {
       return; // Can only undo in friendly matches as admin with moves to undo
     }
@@ -672,6 +770,10 @@ const Game: React.FC = () => {
   }, [session, boardSnapshots, role, socket]);
 
   const handleResign = async () => {
+    if (isSpectator) {
+      toast.error("Spectators cannot resign");
+      return;
+    }
     if (!session) return;
     socket.sendResign(session._id, role);
     // wait for server to emit final result
@@ -680,12 +782,17 @@ const Game: React.FC = () => {
   };
 
   const handleRequestDraw = () => {
+    if (isSpectator) {
+      toast.error("Spectators cannot request draws");
+      return;
+    }
     if (!session) return;
     socket.sendDrawRequest(session._id, role);
     toast.info('Draw request sent to opponent');
   };
 
   const handleAcceptDraw = () => {
+    if (isSpectator) return;
     if (!session) return;
     socket.respondDraw(session._id, true);
     setShowDrawRequest(false);
@@ -694,6 +801,7 @@ const Game: React.FC = () => {
   };
 
   const handleDeclineDraw = () => {
+    if (isSpectator) return;
     if (!session) return;
     socket.respondDraw(session._id, false);
     setShowDrawRequest(false);
@@ -722,6 +830,11 @@ const Game: React.FC = () => {
     setTimeout(() => {
       navigate(role === 'admin' ? '/admin' : '/student');
     }, 0);
+  };
+
+  // Navigate to dashboard WITHOUT resigning (for admins who want to spectate while playing)
+  const handleNavigateToDashboard = () => {
+    navigate('/admin');
   };
 
   const handleAnalyzeBoard = () => {
@@ -829,8 +942,20 @@ const Game: React.FC = () => {
 
         {/* Controls - Responsive buttons */}
         <div className="flex flex-col sm:flex-row justify-center gap-2 sm:gap-3 py-2">
-          {isGameActive && !isAnalyzing ? (
+          {isGameActive && !isAnalyzing && !isSpectator ? (
             <>
+              {/* Back to Dashboard - Admin only, doesn't resign */}
+              {role === 'admin' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleNavigateToDashboard}
+                  className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Dashboard
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -859,6 +984,24 @@ const Game: React.FC = () => {
               >
                 <Flag className="w-4 h-4" />
                 Resign
+              </Button>
+            </>
+          ) : isSpectator ? (
+            <>
+              {/* Spectator mode - read-only */}
+              <div className="text-center py-4">
+                <p className="text-sm text-muted-foreground">
+                  👁️ Spectating - Read-only mode
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleBackToDashboard}
+                className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Back to Dashboard
               </Button>
             </>
           ) : isAnalyzing ? (

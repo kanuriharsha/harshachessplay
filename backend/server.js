@@ -947,6 +947,7 @@ io.on('connection', (socket) => {
         await session.save();
 
         const payload = {
+          sessionId: session._id.toString(),
           fen: session.fen,
           turn: session.turn,
           adminTimeMs: session.adminTimeMs,
@@ -1006,7 +1007,7 @@ io.on('connection', (socket) => {
       session.fen = fen;
       session.lastMoveAt = new Date();
       await session.save();
-      io.to(sessionId).emit('game-update', { fen: session.fen, turn: session.turn, adminTimeMs: session.adminTimeMs, studentTimeMs: session.studentTimeMs, lastMove: null });
+      io.to(sessionId).emit('game-update', { sessionId: session._id.toString(), fen: session.fen, turn: session.turn, adminTimeMs: session.adminTimeMs, studentTimeMs: session.studentTimeMs, lastMove: null });
     } catch (err) {
       console.error('Undo error:', err);
     }
@@ -1015,7 +1016,7 @@ io.on('connection', (socket) => {
   socket.on('draw-request', (data) => {
     const { sessionId, fromRole } = data;
     console.log(`Draw request from ${fromRole} in session ${sessionId}`);
-    socket.to(sessionId).emit('draw-request-received', { fromRole });
+    socket.to(sessionId).emit('draw-request-received', { sessionId, fromRole });
   });
 
   socket.on('draw-response', async (data) => {
@@ -1031,7 +1032,7 @@ io.on('connection', (socket) => {
           // keep session in DB so admin/spectators can review results later
         }
       } else {
-        socket.to(sessionId).emit('draw-declined');
+        socket.to(sessionId).emit('draw-declined', { sessionId });
       }
     } catch (err) {
       console.error('Draw response error:', err);
