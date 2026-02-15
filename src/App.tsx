@@ -11,6 +11,7 @@ import Login from "./pages/Login";
 import StudentDashboard from "./pages/StudentDashboard";
 import AdminDashboard from "./pages/AdminDashboard";
 import Game from "./pages/Game";
+import SpectatorGames from "./pages/SpectatorGames";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -29,8 +30,10 @@ const App = () => (
               <Route path="/" element={<Navigate to="/login" replace />} />
               <Route path="/login" element={<Login />} />
               <Route path="/student" element={<StudentDashboard />} />
+              <Route path="/dashboard" element={<StudentDashboard />} />
               <Route path="/admin" element={<AdminDashboard />} />
               <Route path="/game" element={<Game />} />
+              <Route path="/spectate" element={<SpectatorGames />} />
               <Route path="*" element={<NotFound />} />
             </Routes>
             </SocketProvider>

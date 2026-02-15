@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { Crown, LogOut, Play, Clock, Loader2, XCircle, Users, CheckCircle } from 'lucide-react';
+import { Crown, LogOut, Play, Clock, Loader2, XCircle, Users, CheckCircle, Eye } from 'lucide-react';
 import { initHealthCheck } from '@/lib/healthCheck';
 
 const StudentDashboard: React.FC = () => {
@@ -44,6 +44,55 @@ const StudentDashboard: React.FC = () => {
       navigate('/game');
     }
   }, [activeSession, navigate]);
+
+  // Listen for real-time session creation and transfer events
+  useEffect(() => {
+    const handleSessionCreated = (e: any) => {
+      const data = e.detail;
+      if (!data) return;
+      
+      toast.success('Game starting!', {
+        duration: 2000,
+      });
+      
+      // Navigate to game immediately
+      navigate('/game');
+    };
+
+    const handleTransferredIn = (e: any) => {
+      const data = e.detail;
+      if (!data) return;
+      
+      toast.success(`You have been transferred into a game!`, {
+        duration: 5000,
+      });
+      
+      // Navigate to game
+      navigate('/game');
+    };
+
+    const handleTransferredOut = (e: any) => {
+      const data = e.detail;
+      if (!data) return;
+      
+      toast.warning(`You have been transferred out of your game`, {
+        duration: 5000,
+      });
+      
+      // Refresh the dashboard to show current state
+      refresh();
+    };
+
+    window.addEventListener('app:session-created', handleSessionCreated as EventListener);
+    window.addEventListener('app:game-transferred-in', handleTransferredIn as EventListener);
+    window.addEventListener('app:game-transferred-out', handleTransferredOut as EventListener);
+
+    return () => {
+      window.removeEventListener('app:session-created', handleSessionCreated as EventListener);
+      window.removeEventListener('app:game-transferred-in', handleTransferredIn as EventListener);
+      window.removeEventListener('app:game-transferred-out', handleTransferredOut as EventListener);
+    };
+  }, [navigate, refresh]);
 
   const handleSignOut = async () => {
     await signOut();
@@ -163,6 +212,35 @@ const StudentDashboard: React.FC = () => {
             </CardContent>
           </Card>
         )}
+
+        {/* Spectate Games Card */}
+        {/* <Card className="mb-6 card-shadow">
+          <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Eye className="w-5 h-5" />
+              Watch Games
+            </CardTitle>
+            <CardDescription>
+              Spectate ongoing games and learn from other players
+              {activeSession && (
+                <span className="block mt-1 text-orange-500 text-xs">
+                  ⚠️ You have an active game. Finish it before spectating.
+                </span>
+              )}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button 
+              onClick={() => navigate('/spectate')}
+              variant="outline"
+              className="w-full gap-2"
+              disabled={!!activeSession}
+            >
+              <Eye className="w-4 h-4" />
+              {activeSession ? 'Finish your game first' : 'View Ongoing Games'}
+            </Button>
+          </CardContent>
+        </Card> */}
 
         {/* Main Card with Tabs */}
         <Card className="card-shadow">

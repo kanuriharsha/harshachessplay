@@ -91,7 +91,20 @@ const Game: React.FC = () => {
       let body;
       let sessionData: GameSession | null = null;
       if (spectateId) {
-        // Admin requested spectate of specific session
+        // User requested to spectate a specific session
+        // First check if user has an active game
+        const activeCheck = await fetch(`${API}/sessions/active?userId=${user.id}`);
+        if (activeCheck.ok) {
+          const activeBody = await activeCheck.json();
+          if (activeBody.session) {
+            // User has an active game - prevent spectating
+            toast.error('You cannot spectate while you have an active game. Please finish your game first.');
+            navigate(role === 'admin' ? '/admin' : '/dashboard');
+            return;
+          }
+        }
+        
+        // No active game - allow spectating
         res = await fetch(`${API}/sessions/${spectateId}`);
         if (res.ok) {
           body = await res.json();
@@ -161,13 +174,16 @@ const Game: React.FC = () => {
   useEffect(() => {
     const onGameUpdate = (e: any) => {
       const data = e.detail;
+      console.log('[GAME] onGameUpdate called:', { dataSessionId: data?.sessionId, mySessionId: session?._id });
       if (!data) return;
       
       // CRITICAL: Filter events by session ID to prevent cross-contamination
       // This ensures spectated games don't interfere with active games
       if (session && data.sessionId && data.sessionId !== session._id) {
+        console.log('[GAME] Ignoring update - session ID mismatch');
         return; // Ignore events from other sessions
       }
+      console.log('[GAME] Processing game update:', { fen: data.fen?.substring(0, 30) });
       
       // If we received a remote move, play move/capture sound for both players.
       if (data.fen) {
@@ -181,6 +197,15 @@ const Game: React.FC = () => {
 
           const isCapture = newCount < prevCount;
 
+          // Check if this is the move we just made (to prevent double-playing sound)
+          const moveId = data.lastMove ? `${data.lastMove.from}${data.lastMove.to}${data.fen}` : null;
+          const isOurMove = moveId && lastAppliedMoveRef.current === moveId;
+          
+          // Clear the ref after checking to prevent stale comparisons
+          if (isOurMove) {
+            lastAppliedMoveRef.current = null;
+          }
+
           // play sounds using same assets as ChessBoard
           try {
             const play = (type: 'move' | 'capture') => {
@@ -193,8 +218,13 @@ const Game: React.FC = () => {
               audio.volume = 0.5;
               audio.play().catch(() => {});
             };
-            // Only play when this update includes a lastMove (i.e. a move occurred)
-            if (data.lastMove) play(isCapture ? 'capture' : 'move');
+            // Only play sound when:
+            // 1. This update includes a lastMove (a move occurred)
+            // 2. It's NOT our own move (our move already played sound locally in ChessBoard)
+            // This ensures both players hear the capture/move sound exactly once
+            if (data.lastMove && !isOurMove) {
+              play(isCapture ? 'capture' : 'move');
+            }
           } catch (err) {
             // ignore sound errors
           }
@@ -356,6 +386,73 @@ const Game: React.FC = () => {
       });
     };
 
+    const onGameTransferredOut = (e: any) => {
+      const data = e.detail;
+      if (!data) return;
+      
+      // User has been transferred out of this game
+      toast.warning(`You have been transferred out of this game to ${data.toUsername}`, {
+        duration: 5000,
+      });
+      
+      // Stop the timer
+      if (timerRef.current) clearInterval(timerRef.current);
+      
+      // Redirect back to dashboard after a short delay
+      setTimeout(() => {
+        navigate(role === 'admin' ? '/admin' : '/student');
+      }, 2000);
+    };
+
+    const onGameTransferredIn = (e: any) => {
+      const data = e.detail;
+      if (!data || !data.session) return;
+      
+      // User has been transferred into a game
+      toast.success(`You have been transferred into a game (replacing ${data.fromUsername})`, {
+        duration: 5000,
+      });
+      
+      // Update session state with the new game
+      setSession(data.session);
+      setGame(new Chess(data.session.fen));
+      
+      // Update timers
+      if (data.session.player1TimeMs !== undefined) setPlayer1Time(data.session.player1TimeMs);
+      if (data.session.player2TimeMs !== undefined) setPlayer2Time(data.session.player2TimeMs);
+      if (data.session.adminTimeMs !== undefined) setAdminTime(data.session.adminTimeMs);
+      if (data.session.studentTimeMs !== undefined) setStudentTime(data.session.studentTimeMs);
+      
+      // Navigate to the game page if not already there
+      if (location.pathname !== '/game') {
+        navigate('/game');
+      }
+      
+      // Fetch the session again to ensure we have the latest state
+      setTimeout(() => {
+        fetchSession();
+      }, 500);
+    };
+
+    const onPlayerTransferred = (e: any) => {
+      const data = e.detail;
+      if (!data || !data.session) return;
+      
+      // Filter by session ID
+      if (session && data.sessionId && data.sessionId !== session._id) {
+        return;
+      }
+      
+      // Another player in this game was transferred
+      // Update the session to reflect new player names
+      toast.info(`Player ${data.fromUsername} has been replaced by ${data.toUsername}`, {
+        duration: 5000,
+      });
+      
+      // Update session with new player info
+      setSession(data.session);
+    };
+
     // Use different event mechanisms based on mode:
     // - When PLAYING: Use global window events from SocketContext
     // - When SPECTATING: Use spectator socket's direct event handlers (isolated connection)
@@ -388,6 +485,10 @@ const Game: React.FC = () => {
         onPlayerOffline({ detail: data });
       });
       
+      spectatorSocket.on('player-transferred', (data: any) => {
+        onPlayerTransferred({ detail: data });
+      });
+      
       return () => {
         console.log('[Game] Cleaning up spectator socket event handlers');
         spectatorSocket.off('game-update');
@@ -396,6 +497,7 @@ const Game: React.FC = () => {
         spectatorSocket.off('game-ended');
         spectatorSocket.off('session-reattached');
         spectatorSocket.off('player-offline');
+        spectatorSocket.off('player-transferred');
       };
     } else if (!isSpectator) {
       // PLAYER MODE: Use global window events (doesn't interfere with spectating)
@@ -407,6 +509,9 @@ const Game: React.FC = () => {
       window.addEventListener('app:game-ended', onGameEnded as EventListener);
       window.addEventListener('app:session-reattached', onSessionReattached as EventListener);
       window.addEventListener('app:player-offline', onPlayerOffline as EventListener);
+      window.addEventListener('app:game-transferred-out', onGameTransferredOut as EventListener);
+      window.addEventListener('app:game-transferred-in', onGameTransferredIn as EventListener);
+      window.addEventListener('app:player-transferred', onPlayerTransferred as EventListener);
 
       return () => {
         console.log('[Game] Cleaning up player window event listeners');
@@ -416,9 +521,12 @@ const Game: React.FC = () => {
         window.removeEventListener('app:game-ended', onGameEnded as EventListener);
         window.removeEventListener('app:session-reattached', onSessionReattached as EventListener);
         window.removeEventListener('app:player-offline', onPlayerOffline as EventListener);
+        window.removeEventListener('app:game-transferred-out', onGameTransferredOut as EventListener);
+        window.removeEventListener('app:game-transferred-in', onGameTransferredIn as EventListener);
+        window.removeEventListener('app:player-transferred', onPlayerTransferred as EventListener);
       };
     }
-  }, [adminTime, studentTime, role, fetchSession, game, isSpectator, spectatorSocket, session]);
+  }, [adminTime, studentTime, role, fetchSession, game, isSpectator, spectatorSocket, session, location, navigate]);
 
   // Polling for game updates
   // Only poll for non-spectator games since spectators get real-time updates via socket
@@ -704,17 +812,28 @@ const Game: React.FC = () => {
       // Emit real-time update via SocketProvider
       // Include the last move so remote clients can highlight it even when
       // we recreate the board from a FEN (which loses move history).
-      socket.sendMove({
-        sessionId: session._id,
-        fen: newGame.fen(),
-        turn: newGame.turn(),
-        player1TimeMs: isStudentVsStudent ? player1Time : undefined,
-        player2TimeMs: isStudentVsStudent ? player2Time : undefined,
-        adminTimeMs: !isStudentVsStudent ? adminTime : undefined,
-        studentTimeMs: !isStudentVsStudent ? studentTime : undefined,
-        lastMove: { from: move.from, to: move.to },
-        isCheck: newGame.isCheck(),
-      });
+      console.log('[GAME] About to send move via socket:', { sessionId: session._id, socket: !!socket });
+      if (!socket || !socket.sendMove) {
+        console.error('[GAME] Socket or sendMove not available!');
+        toast.error('Real-time sync unavailable');
+      } else {
+        try {
+          socket.sendMove({
+            sessionId: session._id,
+            fen: newGame.fen(),
+            turn: newGame.turn(),
+            player1TimeMs: isStudentVsStudent ? player1Time : undefined,
+            player2TimeMs: isStudentVsStudent ? player2Time : undefined,
+            adminTimeMs: !isStudentVsStudent ? adminTime : undefined,
+            studentTimeMs: !isStudentVsStudent ? studentTime : undefined,
+            lastMove: { from: move.from, to: move.to },
+            isCheck: newGame.isCheck(),
+          });
+        } catch (err) {
+          console.error('[GAME] Error sending move:', err);
+          toast.error('Failed to send move to opponent');
+        }
+      }
 
       // If the game finished (checkmate/draw), notify server to broadcast game-ended
       if (status === 'completed') {
@@ -730,7 +849,7 @@ const Game: React.FC = () => {
       console.error('Move error:', error);
       return false;
     }
-  }, [game, session, role, adminTime, studentTime, player1Time, player2Time, user?.id]);
+  }, [game, session, role, adminTime, studentTime, player1Time, player2Time, user?.id, socket, isSpectator, timerRef]);
 
   const handleUndo = useCallback(async () => {
     if (isSpectator) {
@@ -774,11 +893,26 @@ const Game: React.FC = () => {
       toast.error("Spectators cannot resign");
       return;
     }
-    if (!session) return;
-    socket.sendResign(session._id, role);
-    // wait for server to emit final result
-    toast.info('You resigned — waiting for server confirmation');
-    if (timerRef.current) clearInterval(timerRef.current);
+    if (!session) {
+      console.error('[RESIGN] No session available');
+      return;
+    }
+    if (!socket || !socket.sendResign) {
+      console.error('[RESIGN] Socket or sendResign not available');
+      toast.error('Unable to resign - connection issue');
+      return;
+    }
+    
+    console.log('[RESIGN] Attempting to resign:', { sessionId: session._id, role });
+    try {
+      socket.sendResign(session._id, role);
+      // wait for server to emit final result
+      toast.info('You resigned — waiting for server confirmation');
+      if (timerRef.current) clearInterval(timerRef.current);
+    } catch (err) {
+      console.error('[RESIGN] Error:', err);
+      toast.error('Failed to resign');
+    }
   };
 
   const handleRequestDraw = () => {
@@ -786,9 +920,24 @@ const Game: React.FC = () => {
       toast.error("Spectators cannot request draws");
       return;
     }
-    if (!session) return;
-    socket.sendDrawRequest(session._id, role);
-    toast.info('Draw request sent to opponent');
+    if (!session) {
+      console.error('[DRAW] No session available');
+      return;
+    }
+    if (!socket || !socket.sendDrawRequest) {
+      console.error('[DRAW] Socket or sendDrawRequest not available');
+      toast.error('Unable to request draw - connection issue');
+      return;
+    }
+    
+    console.log('[DRAW] Requesting draw:', { sessionId: session._id, role });
+    try {
+      socket.sendDrawRequest(session._id, role);
+      toast.info('Draw request sent to opponent');
+    } catch (err) {
+      console.error('[DRAW] Error:', err);
+      toast.error('Failed to send draw request');
+    }
   };
 
   const handleAcceptDraw = () => {
@@ -817,8 +966,8 @@ const Game: React.FC = () => {
     setGameEndDetails({});
     setIsAnalyzing(false);
     
-    // If game is active, send resign to end it for both players, then navigate
-    if (session && session.status === 'active') {
+    // If game is active AND user is not a spectator, send resign to end it for both players
+    if (session && session.status === 'active' && !isSpectator) {
       try {
         socket.sendResign(session._id, role);
       } catch (err) {
@@ -828,7 +977,12 @@ const Game: React.FC = () => {
     
     // Use setTimeout to ensure state updates flush before navigation
     setTimeout(() => {
-      navigate(role === 'admin' ? '/admin' : '/student');
+      // If spectating, go back to spectate page or dashboard based on referrer
+      if (isSpectator) {
+        navigate('/dashboard');
+      } else {
+        navigate(role === 'admin' ? '/admin' : '/dashboard');
+      }
     }, 0);
   };
 

@@ -9,8 +9,9 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { Crown, LogOut, Check, X, Clock, Loader2, Users, Settings, Save, Edit, UserCog, Eye, Gamepad2, Trash2, Menu } from 'lucide-react';
+import { Crown, LogOut, Check, X, Clock, Loader2, Users, Settings, Save, Edit, UserCog, Eye, Gamepad2, Trash2, Menu, ArrowRightLeft } from 'lucide-react';
 import { initHealthCheck } from '@/lib/healthCheck';
+import TransferGameModal from '@/components/chess/TransferGameModal';
 
 const TIME_OPTIONS = [5, 10, 15, 20, 25];
 
@@ -79,6 +80,11 @@ const AdminDashboard: React.FC = () => {
   const [student1IsWhite, setStudent1IsWhite] = useState<boolean>(true);
   const [creatingGame, setCreatingGame] = useState(false);
 
+  // Transfer game state
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [transferFromUserId, setTransferFromUserId] = useState<string>('');
+  const [transferFromUsername, setTransferFromUsername] = useState<string>('');
+
   // Wake up backend when dashboard loads
   useEffect(() => {
     initHealthCheck();
@@ -91,6 +97,27 @@ const AdminDashboard: React.FC = () => {
       navigate('/student');
     }
   }, [user, role, authLoading, navigate]);
+
+  // Listen for real-time session creation when admin accepts a request
+  useEffect(() => {
+    const handleSessionCreated = (e: any) => {
+      const data = e.detail;
+      if (!data) return;
+      
+      toast.success('Game starting!', {
+        duration: 2000,
+      });
+      
+      // Navigate to game immediately
+      navigate('/game');
+    };
+
+    window.addEventListener('app:session-created', handleSessionCreated as EventListener);
+
+    return () => {
+      window.removeEventListener('app:session-created', handleSessionCreated as EventListener);
+    };
+  }, [navigate]);
 
   // REMOVED auto-redirect to game - Admin can now access dashboard while having active game
   // This allows them to spectate other games without abandoning their own game
@@ -432,6 +459,19 @@ const AdminDashboard: React.FC = () => {
     setMobileMenuOpen(false);
   };
 
+  const handleOpenTransferModal = (userId: string, username: string) => {
+    setTransferFromUserId(userId);
+    setTransferFromUsername(username);
+    setShowTransferModal(true);
+  };
+
+  const handleTransferSuccess = () => {
+    // Refresh the active games and users list
+    fetchActiveGames();
+    fetchUsers();
+    toast.success('Game transferred successfully!');
+  };
+
   const handleAccept = async (requestId: string) => {
     if (!selectedTime) {
       toast.error('Please select a time control');
@@ -700,21 +740,30 @@ const AdminDashboard: React.FC = () => {
                               </p>
                             </div>
                           </div>
-                          <div className="w-full sm:w-auto flex gap-2">
+                          <div className="w-full sm:w-auto flex flex-wrap gap-2">
                             <Button
                               variant="outline"
                               size="sm"
                               onClick={() => handleEditUser(u)}
-                              className="gap-2 w-full sm:w-auto"
+                              className="gap-2 flex-1 sm:flex-initial"
                             >
                               <Edit className="w-4 h-4" />
                               Edit
                             </Button>
                             <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleOpenTransferModal(u.id, u.username || u.email)}
+                              className="gap-2 flex-1 sm:flex-initial"
+                            >
+                              <ArrowRightLeft className="w-4 h-4" />
+                              Transfer Game
+                            </Button>
+                            <Button
                               variant="destructive"
                               size="sm"
                               onClick={() => handleDeleteUser(u.id)}
-                              className="gap-2 w-full sm:w-auto"
+                              className="gap-2 flex-1 sm:flex-initial"
                             >
                               Delete
                             </Button>
@@ -1074,13 +1123,17 @@ const AdminDashboard: React.FC = () => {
                             )}
                           </div>
                         </div>
-                        <Button
-                          onClick={() => handleSpectateGame(game._id)}
-                          className="gap-2 w-full sm:w-auto"
-                        >
-                          <Eye className="w-4 h-4" />
-                          Spectate
-                        </Button>
+                        <div className="flex gap-2">
+                          <Button
+                            variant="outline"
+                            onClick={() => handleSpectateGame(game._id)}
+                            className="gap-2"
+                            size="sm"
+                          >
+                            <Eye className="w-4 h-4" />
+                            Spectate
+                          </Button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1360,6 +1413,15 @@ const AdminDashboard: React.FC = () => {
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* Transfer Game Modal */}
+      <TransferGameModal
+        isOpen={showTransferModal}
+        onClose={() => setShowTransferModal(false)}
+        fromUserId={transferFromUserId}
+        fromUsername={transferFromUsername}
+        onTransferSuccess={handleTransferSuccess}
+      />
     </div>
   );
 };

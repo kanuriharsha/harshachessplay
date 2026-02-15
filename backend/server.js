@@ -27,8 +27,16 @@ app.use(express.json());
 const PORT = process.env.PORT || 4000;
 const MONGODB_URI = process.env.MONGODB_URI;
 
-mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => console.log('MongoDB connected'))
+// Optimized MongoDB connection with connection pooling
+mongoose.connect(MONGODB_URI, { 
+  useNewUrlParser: true, 
+  useUnifiedTopology: true,
+  maxPoolSize: 10, // Increase connection pool for better concurrency
+  minPoolSize: 2,
+  serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
+  socketTimeoutMS: 45000,
+})
+  .then(() => console.log('MongoDB connected with optimized pool'))
   .catch((err) => console.error('MongoDB connection error:', err));
 
 // Health check endpoint for Render wake-up
@@ -103,7 +111,7 @@ app.post('/auth/signin', async (req, res) => {
 // User management routes (admin only)
 app.get('/users', async (req, res) => {
   try {
-    const users = await User.find({}).select('-__v').exec();
+    const users = await User.find({}).select('-password -__v').lean().exec();
     res.json({ users: users.map(u => ({ id: u._id, email: u.email, username: u.username, role: u.role, createdAt: u.createdAt })) });
   } catch (err) {
     console.error(err);
@@ -116,7 +124,7 @@ app.get('/users/online', async (req, res) => {
   try {
     const requesterId = req.query.requesterId;
     // Get all registered users with student role
-    const students = await User.find({ role: 'student' }).select('-password -__v').exec();
+    const students = await User.find({ role: 'student' }).select('username email').lean().exec();
     
     // Filter out the requester and mark online status based on connected sockets
     const onlineStudents = students
@@ -191,7 +199,7 @@ app.post('/play-requests', async (req, res) => {
       studentId: fromStudentId,
       targetStudentId: toStudentId,
       status: 'pending'
-    }).exec();
+    }).lean().exec();
     
     if (existing) {
       return res.status(400).json({ error: 'Request already sent' });
@@ -207,7 +215,7 @@ app.post('/play-requests', async (req, res) => {
     // Notify target student via socket
     const targetSockets = userSockets[String(toStudentId)];
     if (targetSockets) {
-      const fromUser = await User.findById(fromStudentId).exec();
+      const fromUser = await User.findById(fromStudentId).select('username').lean().exec();
       for (const sid of targetSockets) {
         io.to(sid).emit('play-request-received', {
           requestId: request._id,
@@ -227,30 +235,36 @@ app.post('/play-requests', async (req, res) => {
   }
 });
 
-// Get incoming play requests for a student
+// Get incoming play requests for a student - OPTIMIZED
 app.get('/play-requests/incoming/:studentId', async (req, res) => {
   const { studentId } = req.params;
   try {
     const requests = await GameRequest.find({
       targetStudentId: studentId,
       status: 'pending'
-    }).sort({ createdAt: -1 }).exec();
+    }).sort({ createdAt: -1 }).lean().exec();
     
-    // Populate sender info
-    const populatedRequests = await Promise.all(
-      requests.map(async (r) => {
-        const sender = await User.findById(r.studentId).exec();
-        return {
-          id: r._id,
-          from: {
-            id: r.studentId,
-            username: sender?.username || 'Unknown'
-          },
-          timeControl: r.timeControl,
-          createdAt: r.createdAt
-        };
-      })
-    );
+    // Batch fetch all sender users at once
+    const senderIds = requests
+      .map(r => r.studentId)
+      .filter(id => mongoose.Types.ObjectId.isValid(String(id)))
+      .map(id => new mongoose.Types.ObjectId(id));
+    
+    const senders = await User.find({ _id: { $in: senderIds } }).select('username').lean().exec();
+    const sendersMap = {};
+    senders.forEach(s => {
+      sendersMap[String(s._id)] = s.username;
+    });
+    
+    const populatedRequests = requests.map(r => ({
+      id: r._id,
+      from: {
+        id: r.studentId,
+        username: sendersMap[r.studentId] || 'Unknown'
+      },
+      timeControl: r.timeControl,
+      createdAt: r.createdAt
+    }));
     
     res.json({ requests: populatedRequests });
   } catch (err) {
@@ -339,12 +353,104 @@ app.patch('/play-requests/:id/respond', async (req, res) => {
 });
 
 
+// Optimized endpoint: Get user's active games only (for transfer modal)
+app.get('/users/:userId/active-games', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const games = await GameSession.find({
+      status: 'active',
+      $or: [
+        { player1Id: userId },
+        { player2Id: userId },
+        { adminId: userId },
+        { studentId: userId }
+      ]
+    }).sort({ createdAt: -1 }).limit(10).lean().exec();
+    
+    // Batch fetch all users at once
+    const allUserIds = [];
+    games.forEach(game => {
+      [game.player1Id, game.player2Id, game.adminId, game.studentId].forEach(id => {
+        if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+          allUserIds.push(new mongoose.Types.ObjectId(id));
+        }
+      });
+    });
+    
+    const users = await User.find({ _id: { $in: allUserIds } }).select('username email').lean().exec();
+    const playersMap = {};
+    users.forEach(p => {
+      playersMap[String(p._id)] = p.username || p.email;
+    });
+    
+    // Map player names
+    const populatedGames = games.map(game => ({
+      _id: game._id,
+      player1Id: game.player1Id,
+      player2Id: game.player2Id,
+      adminId: game.adminId,
+      studentId: game.studentId,
+      player1Name: game.player1Id ? playersMap[game.player1Id] : null,
+      player2Name: game.player2Id ? playersMap[game.player2Id] : null,
+      adminName: game.adminId ? playersMap[game.adminId] : null,
+      studentName: game.studentId ? playersMap[game.studentId] : null,
+      fen: game.fen,
+      status: game.status,
+      createdAt: game.createdAt
+    }));
+    
+    res.json({ games: populatedGames });
+  } catch (err) {
+    console.error('Error fetching user active games:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Optimized endpoint: Get available users (not in active games)
+app.get('/users/available', async (req, res) => {
+  const { excludeUserId } = req.query;
+  try {
+    // Get all active game sessions
+    const activeSessions = await GameSession.find({ status: 'active' })
+      .select('player1Id player2Id adminId studentId')
+      .lean()
+      .exec();
+    
+    // Build set of users currently in games
+    const usersInGames = new Set();
+    activeSessions.forEach(session => {
+      [session.player1Id, session.player2Id, session.adminId, session.studentId].forEach(id => {
+        if (id) usersInGames.add(String(id));
+      });
+    });
+    
+    // Get all users excluding the requester
+    const query = excludeUserId ? { _id: { $ne: new mongoose.Types.ObjectId(excludeUserId) } } : {};
+    const allUsers = await User.find(query).select('username email role').lean().exec();
+    
+    // Filter out users with active games
+    const availableUsers = allUsers.filter(u => !usersInGames.has(String(u._id)));
+    
+    res.json({ 
+      users: availableUsers.map(u => ({
+        id: u._id,
+        username: u.username,
+        email: u.email,
+        role: u.role
+      }))
+    });
+  } catch (err) {
+    console.error('Error fetching available users:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Requests
 app.post('/requests', async (req, res) => {
   // Accept studentId from body when provided (frontend should send authenticated id)
   const userId = req.body?.studentId || 'default_student';
   try {
-    const existing = await GameRequest.findOne({ studentId: userId, status: 'pending' }).exec();
+    const existing = await GameRequest.findOne({ studentId: userId, status: 'pending' }).lean().exec();
     if (existing) return res.status(400).json({ error: 'Existing pending request' });
     const reqDoc = await GameRequest.create({ studentId: userId });
     res.json({ request: reqDoc });
@@ -363,13 +469,13 @@ app.get('/requests', async (req, res) => {
       const userId = req.query.userId;
       // For student-specific requests, only return pending requests so
       // rejected/accepted requests don't appear in the student's dashboard.
-      const requests = await GameRequest.find({ studentId: userId, status: 'pending' }).sort({ createdAt: -1 }).exec();
-      return res.json({ requests: requests.map(r => ({ ...r.toObject(), id: r._id })) });
+      const requests = await GameRequest.find({ studentId: userId, status: 'pending' }).sort({ createdAt: -1 }).lean().exec();
+      return res.json({ requests: requests.map(r => ({ ...r, id: r._id })) });
     }
 
     // Default: return pending requests for admin, newest first
-    const data = await GameRequest.find({ status: 'pending' }).sort({ createdAt: -1 }).exec();
-    res.json({ requests: data.map(r => ({ ...r.toObject(), id: r._id })) });
+    const data = await GameRequest.find({ status: 'pending' }).sort({ createdAt: -1 }).lean().exec();
+    res.json({ requests: data.map(r => ({ ...r, id: r._id })) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -462,44 +568,45 @@ app.get('/sessions/active', async (req, res) => {
   try {
     // If caller requests all active sessions (for server-side joining of rooms), return any active session
     if (req.query.all) {
-      const sessions = await GameSession.find({ status: 'active' }).sort({ createdAt: -1 }).exec();
-      // Populate player names
-      const populatedSessions = await Promise.all(
-        sessions.map(async (s) => {
-          let player1Name = 'Unknown';
-          let player2Name = 'Unknown';
-          
-          if (s.player1Id && mongoose.Types.ObjectId.isValid(String(s.player1Id))) {
-            const p1 = await User.findById(s.player1Id).exec();
-            player1Name = p1?.username || 'Unknown';
-          } else if (s.player1Id) {
-            player1Name = String(s.player1Id);
-          } else if (s.adminId && mongoose.Types.ObjectId.isValid(String(s.adminId))) {
-            const admin = await User.findById(s.adminId).exec();
-            player1Name = admin?.username || 'Admin';
-          } else if (s.adminId) {
-            player1Name = String(s.adminId);
+      // Fetch sessions with lean for better performance
+      const sessions = await GameSession.find({ status: 'active' }).sort({ createdAt: -1 }).lean().exec();
+      
+      // Batch fetch all users at once
+      const allUserIds = [];
+      sessions.forEach(s => {
+        [s.player1Id, s.player2Id, s.adminId, s.studentId].forEach(id => {
+          if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+            allUserIds.push(mongoose.Types.ObjectId(id));
           }
-          
-          if (s.player2Id && mongoose.Types.ObjectId.isValid(String(s.player2Id))) {
-            const p2 = await User.findById(s.player2Id).exec();
-            player2Name = p2?.username || 'Unknown';
-          } else if (s.player2Id) {
-            player2Name = String(s.player2Id);
-          } else if (s.studentId && mongoose.Types.ObjectId.isValid(String(s.studentId))) {
-            const student = await User.findById(s.studentId).exec();
-            player2Name = student?.username || 'Student';
-          } else if (s.studentId) {
-            player2Name = String(s.studentId);
-          }
-          
-          return {
-            ...s.toObject(),
-            player1Name,
-            player2Name
-          };
-        })
-      );
+        });
+      });
+      
+      const users = await User.find({ _id: { $in: allUserIds } }).select('username email').lean().exec();
+      const playersMap = {};
+      users.forEach(p => {
+        playersMap[String(p._id)] = p.username || p.email || 'Unknown';
+      });
+      
+      // Map player names
+      const populatedSessions = sessions.map(game => {
+        let player1Name = 'Unknown';
+        let player2Name = 'Unknown';
+        
+        if (game.player1Id) {
+          player1Name = playersMap[game.player1Id] || String(game.player1Id);
+        } else if (game.adminId) {
+          player1Name = playersMap[game.adminId] || 'Admin';
+        }
+        
+        if (game.player2Id) {
+          player2Name = playersMap[game.player2Id] || String(game.player2Id);
+        } else if (game.studentId) {
+          player2Name = playersMap[game.studentId] || 'Student';
+        }
+        
+        return { ...game, player1Name, player2Name };
+      });
+      
       return res.json({ sessions: populatedSessions });
     }
 
@@ -513,27 +620,26 @@ app.get('/sessions/active', async (req, res) => {
         { player1Id: userId },
         { player2Id: userId }
       ]
-    }).sort({ createdAt: -1 }).exec();
+    }).sort({ createdAt: -1 }).lean().exec();
+    
     if (!session) return res.json({ session: null });
 
-    // Populate names for single session return
-    const s = session.toObject();
-    if (s.player1Id && mongoose.Types.ObjectId.isValid(String(s.player1Id))) {
-      const p1 = await User.findById(s.player1Id).exec();
-      s.player1Name = p1?.username || null;
-    }
-    if (s.player2Id && mongoose.Types.ObjectId.isValid(String(s.player2Id))) {
-      const p2 = await User.findById(s.player2Id).exec();
-      s.player2Name = p2?.username || null;
-    }
-    if (s.adminId && mongoose.Types.ObjectId.isValid(String(s.adminId))) {
-      const a = await User.findById(s.adminId).exec();
-      s.adminName = a?.username || null;
-    }
-    if (s.studentId && mongoose.Types.ObjectId.isValid(String(s.studentId))) {
-      const st = await User.findById(s.studentId).exec();
-      s.studentName = st?.username || null;
-    }
+    // Populate names - batch fetch all users at once
+    const userIds = [session.player1Id, session.player2Id, session.adminId, session.studentId]
+      .filter(id => id && mongoose.Types.ObjectId.isValid(String(id)))
+      .map(id => new mongoose.Types.ObjectId(id));
+    
+    const users = await User.find({ _id: { $in: userIds } }).select('username').lean().exec();
+    const usersMap = {};
+    users.forEach(u => {
+      usersMap[String(u._id)] = u.username;
+    });
+    
+    const s = { ...session };
+    s.player1Name = s.player1Id && usersMap[s.player1Id] ? usersMap[s.player1Id] : null;
+    s.player2Name = s.player2Id && usersMap[s.player2Id] ? usersMap[s.player2Id] : null;
+    s.adminName = s.adminId && usersMap[s.adminId] ? usersMap[s.adminId] : null;
+    s.studentName = s.studentId && usersMap[s.studentId] ? usersMap[s.studentId] : null;
 
     res.json({ session: s });
   } catch (err) {
@@ -542,50 +648,30 @@ app.get('/sessions/active', async (req, res) => {
   }
 });
 
-// Get session by id
+// Get session by id - OPTIMIZED
 app.get('/sessions/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    const s = await GameSession.findById(id).exec();
+    const s = await GameSession.findById(id).lean().exec();
     if (!s) return res.status(404).json({ error: 'Session not found' });
 
-    // Populate friendly player names similar to /sessions/active
-    let player1Name = null;
-    let player2Name = null;
-    let adminName = null;
-    let studentName = null;
-
-    if (s.player1Id && mongoose.Types.ObjectId.isValid(String(s.player1Id))) {
-      const p1 = await User.findById(s.player1Id).exec();
-      player1Name = p1?.username || null;
-    } else if (s.player1Id) {
-      player1Name = String(s.player1Id);
-    }
-    if (s.player2Id && mongoose.Types.ObjectId.isValid(String(s.player2Id))) {
-      const p2 = await User.findById(s.player2Id).exec();
-      player2Name = p2?.username || null;
-    } else if (s.player2Id) {
-      player2Name = String(s.player2Id);
-    }
-    if (s.adminId && mongoose.Types.ObjectId.isValid(String(s.adminId))) {
-      const a = await User.findById(s.adminId).exec();
-      adminName = a?.username || null;
-    } else if (s.adminId) {
-      adminName = String(s.adminId);
-    }
-    if (s.studentId && mongoose.Types.ObjectId.isValid(String(s.studentId))) {
-      const st = await User.findById(s.studentId).exec();
-      studentName = st?.username || null;
-    } else if (s.studentId) {
-      studentName = String(s.studentId);
-    }
+    // Batch fetch all users at once for better performance
+    const userIds = [s.player1Id, s.player2Id, s.adminId, s.studentId]
+      .filter(id => id && mongoose.Types.ObjectId.isValid(String(id)))
+      .map(id => new mongoose.Types.ObjectId(id));
+    
+    const users = await User.find({ _id: { $in: userIds } }).select('username').lean().exec();
+    const usersMap = {};
+    users.forEach(u => {
+      usersMap[String(u._id)] = u.username;
+    });
 
     const out = {
-      ...s.toObject(),
-      player1Name,
-      player2Name,
-      adminName,
-      studentName,
+      ...s,
+      player1Name: s.player1Id ? (usersMap[s.player1Id] || String(s.player1Id)) : null,
+      player2Name: s.player2Id ? (usersMap[s.player2Id] || String(s.player2Id)) : null,
+      adminName: s.adminId ? (usersMap[s.adminId] || String(s.adminId)) : null,
+      studentName: s.studentId ? (usersMap[s.studentId] || String(s.studentId)) : null,
     };
 
     // Resolve winnerId when winner is a role string
@@ -606,55 +692,134 @@ app.get('/sessions/:id', async (req, res) => {
   }
 });
 
-// Get recent sessions (all statuses) - for admin review
+// Get recent sessions (all statuses) - for admin review - OPTIMIZED
 app.get('/sessions', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 50;
-    const sessions = await GameSession.find({}).sort({ createdAt: -1 }).limit(limit).exec();
-    const populated = await Promise.all(sessions.map(async (s) => {
-      let player1Name = null;
-      let player2Name = null;
-      let adminName = null;
-      let studentName = null;
-          if (s.player1Id && mongoose.Types.ObjectId.isValid(String(s.player1Id))) {
-            const p1 = await User.findById(s.player1Id).exec();
-            player1Name = p1?.username || null;
-          } else if (s.player1Id) {
-            player1Name = String(s.player1Id);
-          }
-          if (s.player2Id && mongoose.Types.ObjectId.isValid(String(s.player2Id))) {
-            const p2 = await User.findById(s.player2Id).exec();
-            player2Name = p2?.username || null;
-          } else if (s.player2Id) {
-            player2Name = String(s.player2Id);
-          }
-          if (s.adminId && mongoose.Types.ObjectId.isValid(String(s.adminId))) {
-            const a = await User.findById(s.adminId).exec();
-            adminName = a?.username || null;
-          } else if (s.adminId) {
-            adminName = String(s.adminId);
-          }
-          if (s.studentId && mongoose.Types.ObjectId.isValid(String(s.studentId))) {
-            const st = await User.findById(s.studentId).exec();
-            studentName = st?.username || null;
-          } else if (s.studentId) {
-            studentName = String(s.studentId);
-          }
-      const out = { ...s.toObject(), player1Name, player2Name, adminName, studentName };
+    
+    // Fetch sessions with lean for better performance
+    const sessions = await GameSession.find({}).sort({ createdAt: -1 }).limit(limit).lean().exec();
+    
+    // Batch fetch all users at once
+    const allUserIds = [];
+    sessions.forEach(s => {
+      [s.player1Id, s.player2Id, s.adminId, s.studentId].forEach(id => {
+        if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+          allUserIds.push(new mongoose.Types.ObjectId(id));
+        }
+      });
+    });
+    
+    const users = await User.find({ _id: { $in: allUserIds } }).select('username').lean().exec();
+    const playersMap = {};
+    users.forEach(p => {
+      playersMap[String(p._id)] = p.username;
+    });
+    
+    // Map player names
+    const populated = sessions.map(s => {
+      const out = {
+        ...s,
+        player1Name: s.player1Id ? (playersMap[s.player1Id] || String(s.player1Id)) : null,
+        player2Name: s.player2Id ? (playersMap[s.player2Id] || String(s.player2Id)) : null,
+        adminName: s.adminId ? (playersMap[s.adminId] || String(s.adminId)) : null,
+        studentName: s.studentId ? (playersMap[s.studentId] || String(s.studentId)) : null
+      };
+      
+      // Resolve winnerId
       try {
         let winnerId = null;
         if (out.winner) {
-          winnerId = getUserIdByRole(s, out.winner) || (typeof out.winner === 'string' && out.winner.match(/^[a-fA-F0-9]{24}$/) ? out.winner : null);
+          winnerId = getUserIdByRole(s, out.winner) || 
+            (typeof out.winner === 'string' && out.winner.match(/^[a-fA-F0-9]{24}$/) ? out.winner : null);
         }
         out.winnerId = winnerId;
       } catch (err) {
         out.winnerId = null;
       }
+      
       return out;
-    }));
+    });
+    
     res.json({ sessions: populated });
   } catch (err) {
     console.error('Error fetching sessions list:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get all ongoing games for spectators
+app.get('/sessions/ongoing', async (req, res) => {
+  try {
+    const { userId } = req.query; // Optional: exclude games user is currently playing in
+    console.log(`[ONGOING GAMES] Request from user ${userId || 'anonymous'}`);
+    
+    // Find all active sessions
+    const query = { status: 'active' };
+    
+    // Optionally exclude games where the user is already a player
+    if (userId) {
+      query.$and = [
+        { $or: [
+          { player1Id: { $ne: userId } },
+          { player1Id: { $exists: false } }
+        ]},
+        { $or: [
+          { player2Id: { $ne: userId } },
+          { player2Id: { $exists: false } }
+        ]},
+        { $or: [
+          { adminId: { $ne: userId } },
+          { adminId: { $exists: false } }
+        ]},
+        { $or: [
+          { studentId: { $ne: userId } },
+          { studentId: { $exists: false } }
+        ]}
+      ];
+    }
+    
+    const sessions = await GameSession.find(query)
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean()
+      .exec();
+    
+    console.log(`[ONGOING GAMES] Found ${sessions.length} active sessions`);
+    
+    // Batch fetch all user details
+    const allUserIds = [];
+    sessions.forEach(s => {
+      [s.player1Id, s.player2Id, s.adminId, s.studentId].forEach(id => {
+        if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+          allUserIds.push(new mongoose.Types.ObjectId(id));
+        }
+      });
+    });
+    
+    const users = await User.find({ _id: { $in: allUserIds } })
+      .select('username email')
+      .lean()
+      .exec();
+    
+    const usersMap = {};
+    users.forEach(u => {
+      usersMap[String(u._id)] = u.username || u.email;
+    });
+    
+    // Populate sessions with player names
+    const populatedSessions = sessions.map(s => ({
+      ...s,
+      _id: String(s._id),
+      player1Name: s.player1Id ? usersMap[String(s.player1Id)] : null,
+      player2Name: s.player2Id ? usersMap[String(s.player2Id)] : null,
+      adminName: s.adminId ? usersMap[String(s.adminId)] : null,
+      studentName: s.studentId ? usersMap[String(s.studentId)] : null,
+    }));
+    
+    res.json({ sessions: populatedSessions });
+  } catch (err) {
+    console.error('Error fetching ongoing sessions:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -786,6 +951,190 @@ app.delete('/sessions/:id', async (req, res) => {
   }
 });
 
+// Transfer game - admin can reassign a player in an active game to a different user
+app.post('/sessions/:id/transfer', async (req, res) => {
+  const { id } = req.params;
+  const { fromUserId, toUserId, adminId } = req.body;
+  
+  if (!fromUserId || !toUserId) {
+    return res.status(400).json({ error: 'Both fromUserId and toUserId are required' });
+  }
+  
+  if (fromUserId === toUserId) {
+    return res.status(400).json({ error: 'Cannot transfer to the same user' });
+  }
+  
+  try {
+    // Verify session exists and is active
+    const session = await GameSession.findById(id).exec();
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    
+    if (session.status !== 'active') {
+      return res.status(400).json({ error: 'Can only transfer active games' });
+    }
+    
+    // Verify fromUser is actually in this game
+    const isPlayer1 = String(session.player1Id) === String(fromUserId);
+    const isPlayer2 = String(session.player2Id) === String(fromUserId);
+    const isAdmin = String(session.adminId) === String(fromUserId);
+    const isStudent = String(session.studentId) === String(fromUserId);
+    
+    if (!isPlayer1 && !isPlayer2 && !isAdmin && !isStudent) {
+      return res.status(400).json({ error: 'User is not a player in this game' });
+    }
+    
+    // Verify toUser exists and is not in this game
+    const toUser = await User.findById(toUserId).exec();
+    if (!toUser) return res.status(404).json({ error: 'Target user not found' });
+    
+    const isToUserInGame = 
+      String(session.player1Id) === String(toUserId) ||
+      String(session.player2Id) === String(toUserId) ||
+      String(session.adminId) === String(toUserId) ||
+      String(session.studentId) === String(toUserId);
+    
+    if (isToUserInGame) {
+      return res.status(400).json({ error: 'Target user is already in this game' });
+    }
+    
+    // Verify toUser has no active game
+    const toUserActiveGame = await GameSession.findOne({
+      status: 'active',
+      $or: [
+        { adminId: toUserId },
+        { studentId: toUserId },
+        { player1Id: toUserId },
+        { player2Id: toUserId }
+      ]
+    }).exec();
+    
+    if (toUserActiveGame) {
+      return res.status(400).json({ error: 'Target user already has an active game' });
+    }
+    
+    // Get fromUser info for notification
+    const fromUser = await User.findById(fromUserId).exec();
+    
+    // Perform the transfer - update the appropriate player field
+    if (isPlayer1) {
+      session.player1Id = toUserId;
+    } else if (isPlayer2) {
+      session.player2Id = toUserId;
+    } else if (isAdmin) {
+      session.adminId = toUserId;
+    } else if (isStudent) {
+      session.studentId = toUserId;
+    }
+    
+    await session.save();
+    
+    // Populate session with names for response
+    const populatedSession = session.toObject();
+    if (session.player1Id) {
+      const p1 = await User.findById(session.player1Id).exec();
+      populatedSession.player1Name = p1?.username || null;
+    }
+    if (session.player2Id) {
+      const p2 = await User.findById(session.player2Id).exec();
+      populatedSession.player2Name = p2?.username || null;
+    }
+    if (session.adminId) {
+      const a = await User.findById(session.adminId).exec();
+      populatedSession.adminName = a?.username || null;
+    }
+    if (session.studentId) {
+      const st = await User.findById(session.studentId).exec();
+      populatedSession.studentName = st?.username || null;
+    }
+    
+    // Emit socket events to notify all parties
+    const sessionId = session._id.toString();
+    
+    // Notify the old player they have been removed AND disconnect them from the session
+    const fromUserSockets = userSockets[String(fromUserId)];
+    if (fromUserSockets) {
+      for (const sid of fromUserSockets) {
+        io.to(sid).emit('game-transferred-out', {
+          sessionId,
+          message: 'You have been transferred out of this game',
+          toUsername: toUser.username || toUser.email
+        });
+        
+        // CRITICAL: Make the socket leave the session room so they stop receiving updates
+        const socket = io.sockets.sockets.get(sid);
+        if (socket) {
+          socket.leave(sessionId);
+          console.log(`Socket ${sid} removed from session room ${sessionId}`);
+        }
+        
+        // Remove from sessionSockets mapping
+        if (sessionSockets[sessionId]) {
+          if (sessionSockets[sessionId].admin === sid) sessionSockets[sessionId].admin = null;
+          if (sessionSockets[sessionId].student === sid) sessionSockets[sessionId].student = null;
+          if (sessionSockets[sessionId].player1 === sid) sessionSockets[sessionId].player1 = null;
+          if (sessionSockets[sessionId].player2 === sid) sessionSockets[sessionId].player2 = null;
+        }
+        
+        // Remove from socketToSession mapping
+        delete socketToSession[sid];
+      }
+    }
+    
+    // Notify the new player they have been transferred in
+    const toUserSockets = userSockets[String(toUserId)];
+    if (toUserSockets) {
+      for (const sid of toUserSockets) {
+        io.to(sid).emit('game-transferred-in', {
+          sessionId,
+          session: populatedSession,
+          message: `You have been transferred into this game (replacing ${fromUser?.username || 'a player'})`,
+          fromUsername: fromUser?.username || fromUser?.email
+        });
+        
+        // Make the new player join the session room
+        const socket = io.sockets.sockets.get(sid);
+        if (socket) {
+          socket.join(sessionId);
+          console.log(`Socket ${sid} joined session room ${sessionId}`);
+          
+          // Update sessionSockets mapping
+          if (!sessionSockets[sessionId]) {
+            sessionSockets[sessionId] = { admin: null, student: null, player1: null, player2: null, spectators: [] };
+          }
+          
+          // Set the correct role in sessionSockets
+          if (String(session.adminId) === String(toUserId)) sessionSockets[sessionId].admin = sid;
+          else if (String(session.studentId) === String(toUserId)) sessionSockets[sessionId].student = sid;
+          else if (String(session.player1Id) === String(toUserId)) sessionSockets[sessionId].player1 = sid;
+          else if (String(session.player2Id) === String(toUserId)) sessionSockets[sessionId].player2 = sid;
+          
+          // Update socketToSession mapping
+          socketToSession[sid] = { sessionId, role: null, isSpectator: false };
+        }
+      }
+    }
+    
+    // Notify other players and spectators in the game about the transfer
+    io.to(sessionId).emit('player-transferred', {
+      sessionId,
+      fromUserId,
+      toUserId,
+      fromUsername: fromUser?.username || 'Player',
+      toUsername: toUser.username || 'Player',
+      session: populatedSession
+    });
+    
+    res.json({ 
+      success: true, 
+      session: populatedSession,
+      message: `Game transferred from ${fromUser?.username || 'player'} to ${toUser.username || 'player'}`
+    });
+  } catch (err) {
+    console.error('Error transferring game:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 const { Server: IOServer } = require('socket.io');
@@ -914,14 +1263,19 @@ io.on('connection', (socket) => {
   // Enqueue moves to ensure sequential processing per session and avoid race conditions
   socket.on('move', (data) => {
     const { sessionId } = data || {};
+    console.log(`[MOVE RECEIVED] Socket ${socket.id} sent move for session ${sessionId}`);
     const socketInfo = socketToSession[socket.id];
     if (socketInfo && socketInfo.isSpectator) {
       console.log('Spectator attempted to make a move - blocked');
       return;
     }
-    if (!sessionId) return;
+    if (!sessionId) {
+      console.log('[MOVE ERROR] No sessionId provided');
+      return;
+    }
     if (!sessionMoveQueues[sessionId]) sessionMoveQueues[sessionId] = [];
     sessionMoveQueues[sessionId].push({ socketId: socket.id, data });
+    console.log(`[MOVE QUEUED] Session ${sessionId} queue length: ${sessionMoveQueues[sessionId].length}`);
     // start processing if not already
     if (!sessionProcessing[sessionId]) processNextMove(sessionId).catch(err => console.error('processNextMove error:', err));
   });
@@ -956,6 +1310,7 @@ io.on('connection', (socket) => {
           player2TimeMs: session.player2TimeMs,
         };
         if (data && data.lastMove) payload.lastMove = data.lastMove;
+        console.log(`[GAME-UPDATE EMIT] Emitting to room ${sessionId}, FEN: ${session.fen.substring(0, 30)}...`);
         io.to(sessionId).emit('game-update', payload);
       } catch (err) {
         console.error('Move processing error for session', sessionId, err);
@@ -1015,12 +1370,13 @@ io.on('connection', (socket) => {
 
   socket.on('draw-request', (data) => {
     const { sessionId, fromRole } = data;
-    console.log(`Draw request from ${fromRole} in session ${sessionId}`);
+    console.log(`[DRAW REQUEST] From ${fromRole} in session ${sessionId}`);
     socket.to(sessionId).emit('draw-request-received', { sessionId, fromRole });
   });
 
   socket.on('draw-response', async (data) => {
     const { sessionId, accepted } = data;
+    console.log(`[DRAW RESPONSE] Session ${sessionId}, accepted=${accepted}`);
     try {
       if (accepted) {
         const session = await GameSession.findById(sessionId).exec();
@@ -1028,10 +1384,12 @@ io.on('connection', (socket) => {
           session.status = 'completed';
           session.winner = 'draw';
           await session.save();
+          console.log(`[DRAW ACCEPTED] Emitting game-ended for session ${sessionId}`);
           io.to(sessionId).emit('game-ended', { result: 'draw', winner: 'draw', winnerId: null, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id });
           // keep session in DB so admin/spectators can review results later
         }
       } else {
+        console.log(`[DRAW DECLINED] Notifying session ${sessionId}`);
         socket.to(sessionId).emit('draw-declined', { sessionId });
       }
     } catch (err) {
@@ -1041,6 +1399,7 @@ io.on('connection', (socket) => {
 
   socket.on('resign', async (data) => {
     const { sessionId, resignerRole } = data;
+    console.log(`[RESIGN] User resigned: role=${resignerRole}, session=${sessionId}`);
     try {
       const session = await GameSession.findById(sessionId).exec();
       if (session) {

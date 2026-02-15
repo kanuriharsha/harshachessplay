@@ -32,11 +32,12 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      console.log('Socket connected', socket.id);
+      console.log('[SOCKET] Socket connected', socket.id);
       setConnected(true);
       // Register this socket with the server so it can receive user-specific events
       try {
         socket.emit('register', { userId: user.id, role });
+        console.log('[SOCKET] Registered with server:', { userId: user.id, role });
       } catch (err) {
         console.error('Socket register emit failed', err);
       }
@@ -61,6 +62,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
 
     socket.on('game-update', (data: any) => {
+      console.log('[SOCKET] Received game-update:', { sessionId: data.sessionId, fen: data.fen?.substring(0, 30) });
       window.dispatchEvent(new CustomEvent('app:game-update', { detail: data }));
     });
 
@@ -118,6 +120,25 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       window.dispatchEvent(new CustomEvent('app:play-request-rejected', { detail: data }));
     });
 
+    socket.on('game-transferred-out', (data: any) => {
+      console.log('Game transferred out:', data);
+      window.dispatchEvent(new CustomEvent('app:game-transferred-out', { detail: data }));
+    });
+
+    socket.on('game-transferred-in', (data: any) => {
+      console.log('Game transferred in:', data);
+      // Auto-join the transferred session room
+      if (data && data.sessionId) {
+        socket.emit('join-session', { sessionId: data.sessionId, role });
+      }
+      window.dispatchEvent(new CustomEvent('app:game-transferred-in', { detail: data }));
+    });
+
+    socket.on('player-transferred', (data: any) => {
+      console.log('Player transferred:', data);
+      window.dispatchEvent(new CustomEvent('app:player-transferred', { detail: data }));
+    });
+
     socket.on('connect_error', (err: any) => {
       console.error('Socket connect_error', err);
     });
@@ -129,7 +150,12 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, [user]);
 
   const sendDrawRequest = (sessionId: string, fromRole: string) => {
-    socketRef.current?.emit('draw-request', { sessionId, fromRole });
+    if (!socketRef.current) {
+      console.error('[SOCKET] Cannot send draw request - socket not connected');
+      return;
+    }
+    console.log('[SOCKET] Sending draw request:', { sessionId, fromRole });
+    socketRef.current.emit('draw-request', { sessionId, fromRole });
   };
 
   const respondDraw = (sessionId: string, accepted: boolean) => {
@@ -137,6 +163,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   const sendMove = (payload: any) => {
+    console.log('[SOCKET] Sending move:', { sessionId: payload.sessionId, fen: payload.fen?.substring(0, 30) });
     socketRef.current?.emit('move', payload);
   };
 
@@ -153,11 +180,16 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const sendResign = (sessionId: string, resignerRole: string) => {
     // support either (sessionId, resignerRole) or single object { sessionId, resignerRole }
-    if (!socketRef.current) return;
+    if (!socketRef.current) {
+      console.error('[SOCKET] Cannot send resign - socket not connected');
+      return;
+    }
+    
+    console.log('[SOCKET] Sending resign:', { sessionId, resignerRole });
     if (typeof sessionId === 'object' && sessionId !== null) {
-      socketRef.current?.emit('resign', sessionId);
+      socketRef.current.emit('resign', sessionId);
     } else {
-      socketRef.current?.emit('resign', { sessionId, resignerRole });
+      socketRef.current.emit('resign', { sessionId, resignerRole });
     }
   };
 
