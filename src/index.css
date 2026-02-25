@@ -53,14 +53,14 @@
     --shadow-board: 0 20px 60px -15px hsl(220 15% 20% / 0.2);
     --shadow-card: 0 4px 20px -4px hsl(220 15% 20% / 0.08);
 
-    --sidebar-background: 40 20% 97%;
-    --sidebar-foreground: 220 15% 25%;
-    --sidebar-primary: 93 28% 35%;
-    --sidebar-primary-foreground: 60 47% 95%;
-    --sidebar-accent: 40 15% 92%;
-    --sidebar-accent-foreground: 220 15% 25%;
-    --sidebar-border: 40 15% 88%;
-    --sidebar-ring: 93 28% 47%;
+    --sidebar-background: 93 25% 25%;
+    --sidebar-foreground: 75 30% 90%;
+    --sidebar-primary: 93 42% 38%;
+    --sidebar-primary-foreground: 75 35% 96%;
+    --sidebar-accent: 93 20% 30%;
+    --sidebar-accent-foreground: 75 30% 90%;
+    --sidebar-border: 93 20% 21%;
+    --sidebar-ring: 93 42% 50%;
   }
 
   .dark {
@@ -92,14 +92,14 @@
     --input: 220 15% 20%;
     --ring: 93 35% 50%;
 
-    --sidebar-background: 220 18% 12%;
-    --sidebar-foreground: 40 20% 90%;
-    --sidebar-primary: 93 35% 50%;
-    --sidebar-primary-foreground: 220 20% 10%;
-    --sidebar-accent: 220 15% 18%;
-    --sidebar-accent-foreground: 40 20% 90%;
-    --sidebar-border: 220 15% 18%;
-    --sidebar-ring: 93 35% 50%;
+    --sidebar-background: 93 25% 25%;
+    --sidebar-foreground: 75 30% 90%;
+    --sidebar-primary: 93 42% 38%;
+    --sidebar-primary-foreground: 75 35% 96%;
+    --sidebar-accent: 93 20% 30%;
+    --sidebar-accent-foreground: 75 30% 90%;
+    --sidebar-border: 93 20% 21%;
+    --sidebar-ring: 93 42% 50%;
   }
 }
 
@@ -125,5 +125,38 @@
   
   .card-shadow {
     box-shadow: var(--shadow-card);
+  }
+
+  .banner-shine {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .banner-shine::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -45%;
+    width: 35%;
+    height: 100%;
+    pointer-events: none;
+    background: linear-gradient(
+      120deg,
+      transparent 0%,
+      hsl(var(--primary) / 0.05) 20%,
+      hsl(var(--primary) / 0.28) 50%,
+      hsl(var(--primary) / 0.05) 80%,
+      transparent 100%
+    );
+    animation: banner-shine-sweep 3.8s linear infinite;
+  }
+
+  @keyframes banner-shine-sweep {
+    0% {
+      transform: translateX(0%);
+    }
+    100% {
+      transform: translateX(420%);
+    }
   }
 }

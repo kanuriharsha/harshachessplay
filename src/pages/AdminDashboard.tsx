@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { Crown, LogOut, Check, X, Clock, Loader2, Users, Settings, Save, Edit, UserCog, Eye, Gamepad2, Trash2, Menu, ArrowRightLeft } from 'lucide-react';
+import { Crown, LogOut, Check, X, Clock, Loader2, Users, Settings, Save, Edit, UserCog, Eye, Gamepad2, Trash2, Menu, ArrowRightLeft, Trophy, Plus } from 'lucide-react';
 import { initHealthCheck } from '@/lib/healthCheck';
 import TransferGameModal from '@/components/chess/TransferGameModal';
 
@@ -40,6 +40,40 @@ interface ActiveGame {
   studentName?: string | null;
 }
 
+interface LeaderboardFormEntry {
+  position: number;
+  userId: string;
+  username: string;
+  fullName: string;
+}
+
+interface LeaderboardBannerConfig {
+  enabled: boolean;
+  playerName: string;
+}
+
+const createEmptyLeaderboardEntry = (position: number): LeaderboardFormEntry => ({
+  position,
+  userId: '',
+  username: '',
+  fullName: '',
+});
+
+const getOrdinalSuffix = (num: number) => {
+  const mod100 = num % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${num}th`;
+  switch (num % 10) {
+    case 1:
+      return `${num}st`;
+    case 2:
+      return `${num}nd`;
+    case 3:
+      return `${num}rd`;
+    default:
+      return `${num}th`;
+  }
+};
+
 const AdminDashboard: React.FC = () => {
   const { user, role, signOut, loading: authLoading } = useAuth();
   const navigate = useNavigate();
@@ -54,7 +88,6 @@ const AdminDashboard: React.FC = () => {
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({ username: '', password: '', email: '' });
-  const [showUserManagement, setShowUserManagement] = useState(false);
   const [showAddUser, setShowAddUser] = useState(false);
   const [newUser, setNewUser] = useState({ username: '', email: '', password: '', role: 'student' as 'admin' | 'student' });
 
@@ -84,6 +117,24 @@ const AdminDashboard: React.FC = () => {
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [transferFromUserId, setTransferFromUserId] = useState<string>('');
   const [transferFromUsername, setTransferFromUsername] = useState<string>('');
+
+  // Leaderboard state
+  const [leaderboardEntries, setLeaderboardEntries] = useState<LeaderboardFormEntry[]>([
+    createEmptyLeaderboardEntry(1),
+    createEmptyLeaderboardEntry(2),
+    createEmptyLeaderboardEntry(3),
+  ]);
+  const [leaderboardBanner, setLeaderboardBanner] = useState<LeaderboardBannerConfig>({
+    enabled: false,
+    playerName: '',
+  });
+  const [loadingLb, setLoadingLb] = useState(false);
+  const [savingLb, setSavingLb] = useState(false);
+
+  const studentUsers = useMemo(
+    () => users.filter((u) => u.role === 'student'),
+    [users]
+  );
 
   // Wake up backend when dashboard loads
   useEffect(() => {
@@ -454,9 +505,124 @@ const AdminDashboard: React.FC = () => {
     }
   };
 
+  const fetchLeaderboard = async () => {
+    setLoadingLb(true);
+    try {
+      const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
+      const res = await fetch(`${API}/leaderboard`);
+      if (res.ok) {
+        const data = await res.json();
+        setLeaderboardBanner({
+          enabled: Boolean(data?.banner?.enabled),
+          playerName: typeof data?.banner?.playerName === 'string' ? data.banner.playerName : '',
+        });
+
+        const fetchedEntries: LeaderboardFormEntry[] = (data.entries || [])
+          .map((e: any) => ({
+            position: Number(e?.position),
+            userId: typeof e?.userId === 'string' ? e.userId : '',
+            username: typeof e?.username === 'string' ? e.username : '',
+            fullName: typeof e?.fullName === 'string' ? e.fullName : '',
+          }))
+          .filter((e: LeaderboardFormEntry) => Number.isInteger(e.position) && e.position > 0)
+          .sort((a, b) => a.position - b.position);
+
+        if (fetchedEntries.length === 0) {
+          setLeaderboardEntries([
+            createEmptyLeaderboardEntry(1),
+            createEmptyLeaderboardEntry(2),
+            createEmptyLeaderboardEntry(3),
+          ]);
+          return;
+        }
+
+        const byPosition = new Map(fetchedEntries.map((entry) => [entry.position, entry]));
+        const maxPosition = Math.max(3, ...fetchedEntries.map((entry) => entry.position));
+        const normalized = Array.from({ length: maxPosition }, (_, index) => {
+          const position = index + 1;
+          return byPosition.get(position) || createEmptyLeaderboardEntry(position);
+        });
+        setLeaderboardEntries(normalized);
+      }
+    } catch (err) {
+      toast.error('Failed to load leaderboard');
+    } finally {
+      setLoadingLb(false);
+    }
+  };
+
+  const updateLeaderboardEntry = (position: number, patch: Partial<LeaderboardFormEntry>) => {
+    setLeaderboardEntries((prev) =>
+      prev.map((entry) => (entry.position === position ? { ...entry, ...patch } : entry))
+    );
+  };
+
+  const addLeaderboardPlace = () => {
+    setLeaderboardEntries((prev) => {
+      const lastPosition = prev.length > 0 ? prev[prev.length - 1].position : 0;
+      return [...prev, createEmptyLeaderboardEntry(lastPosition + 1)];
+    });
+  };
+
+  const removeLeaderboardPlace = (position: number) => {
+    setLeaderboardEntries((prev) => {
+      const remaining = prev.filter((entry) => entry.position !== position);
+      const reindexed = remaining
+        .sort((a, b) => a.position - b.position)
+        .map((entry, index) => ({ ...entry, position: index + 1 }));
+
+      while (reindexed.length < 3) {
+        reindexed.push(createEmptyLeaderboardEntry(reindexed.length + 1));
+      }
+
+      return reindexed;
+    });
+  };
+
+  const saveLeaderboard = async () => {
+    setSavingLb(true);
+    try {
+      const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
+      const entries = leaderboardEntries
+        .map((entry) => ({
+          position: entry.position,
+          userId: entry.userId.trim() || null,
+          username: entry.username.trim(),
+          fullName: entry.fullName.trim(),
+        }))
+        .filter((entry) => entry.username || entry.fullName)
+        .sort((a, b) => a.position - b.position);
+
+      const res = await fetch(`${API}/leaderboard`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entries,
+          banner: {
+            enabled: leaderboardBanner.enabled,
+            playerName: leaderboardBanner.playerName,
+          },
+        }),
+      });
+      if (res.ok) {
+        toast.success('Leaderboard saved!');
+      } else {
+        toast.error('Failed to save leaderboard');
+      }
+    } catch (err) {
+      toast.error('Error saving leaderboard');
+    } finally {
+      setSavingLb(false);
+    }
+  };
+
   const handleTabChange = (value: string) => {
     setActiveTab(value);
     setMobileMenuOpen(false);
+    if (value === 'leaderboard') {
+      fetchLeaderboard();
+      if (users.length === 0) fetchUsers();
+    }
   };
 
   const handleOpenTransferModal = (userId: string, username: string) => {
@@ -523,8 +689,8 @@ const AdminDashboard: React.FC = () => {
           </div>
           <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
             <Button 
-              variant={showUserManagement ? "default" : "outline"} 
-              onClick={() => setShowUserManagement(!showUserManagement)} 
+              variant={activeTab === 'users' ? "default" : "outline"} 
+              onClick={() => handleTabChange('users')} 
               className="gap-2"
             >
               <Settings className="w-4 h-4" />
@@ -582,26 +748,31 @@ const AdminDashboard: React.FC = () => {
 
         {/* Main Tabs */}
         <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-6">
-          <TabsList className={`w-full flex-col sm:flex-row gap-2 ${mobileMenuOpen ? 'flex' : 'hidden sm:flex'}`}>
-            <TabsTrigger value="requests" className="w-full text-center py-2 rounded-md">
+          <TabsList
+            className={`w-full gap-2 items-stretch ${mobileMenuOpen ? 'flex flex-col h-auto' : 'hidden'} sm:flex sm:flex-row sm:h-10`}
+          >
+            <TabsTrigger value="requests" className="w-full sm:flex-1 text-center py-2 rounded-md">
               Play Requests
               {pendingRequests.length > 0 && (
                 <Badge className="ml-2" variant="destructive">{pendingRequests.length}</Badge>
               )}
             </TabsTrigger>
-            <TabsTrigger value="spectate" className="w-full text-center py-2 rounded-md">
+            <TabsTrigger value="spectate" className="w-full sm:flex-1 text-center py-2 rounded-md">
               Spectate Games
               {activeGames.length > 0 && (
                 <Badge className="ml-2">{activeGames.length}</Badge>
               )}
             </TabsTrigger>
-            <TabsTrigger value="history" className="w-full text-center py-2 rounded-md">
+            <TabsTrigger value="history" className="w-full sm:flex-1 text-center py-2 rounded-md">
               Game History
               {historyGames.length > 0 && (
                 <Badge className="ml-2">{historyGames.length}</Badge>
               )}
             </TabsTrigger>
-            <TabsTrigger value="users" className="w-full text-center py-2 rounded-md">User Management</TabsTrigger>
+            <TabsTrigger value="users" className="w-full sm:flex-1 text-center py-2 rounded-md">User Management</TabsTrigger>
+            <TabsTrigger value="leaderboard" className="w-full sm:flex-1 text-center py-2 rounded-md">
+              <Trophy className="w-4 h-4 mr-1 inline" />Leaderboard
+            </TabsTrigger>
           </TabsList>
 
           {/* Play Requests Tab */}
@@ -1406,6 +1577,151 @@ const AdminDashboard: React.FC = () => {
                         )}
                       </div>
                     ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* Leaderboard management tab */}
+          <TabsContent value="leaderboard">
+            <Card className="card-shadow">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Trophy className="w-5 h-5 text-yellow-500" />
+                  Set Leaderboard
+                </CardTitle>
+                <CardDescription>
+                  Assign students for ranked places. 1st–3rd show medal cards, and 4th onward appear as a normal
+                  numbered list on the student Leaderboard page.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {loadingLb ? (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    <div className="p-4 rounded-xl border bg-card space-y-3">
+                      <Label className="font-semibold">Best Player Banner</Label>
+                      <label className="flex items-center gap-3 text-sm">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-primary"
+                          checked={leaderboardBanner.enabled}
+                          onChange={(e) =>
+                            setLeaderboardBanner((prev) => ({ ...prev, enabled: e.target.checked }))
+                          }
+                        />
+                        Enable animated “Congratulations” banner on student leaderboard
+                      </label>
+                      <div>
+                        <Label className="text-sm text-muted-foreground">Best player name for banner</Label>
+                        <Input
+                          className="mt-1"
+                          placeholder="Enter best player name"
+                          value={leaderboardBanner.playerName}
+                          disabled={!leaderboardBanner.enabled}
+                          onChange={(e) =>
+                            setLeaderboardBanner((prev) => ({ ...prev, playerName: e.target.value }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    {leaderboardEntries.map((entry) => {
+                      const isGold = entry.position === 1;
+                      const isSilver = entry.position === 2;
+                      const isBronze = entry.position === 3;
+                      const medal = isGold ? '🥇' : isSilver ? '🥈' : isBronze ? '🥉' : null;
+                      const cardClass = isGold
+                        ? 'border-yellow-400 bg-yellow-50 dark:bg-yellow-900/20'
+                        : isSilver
+                        ? 'border-gray-400 bg-gray-50 dark:bg-gray-800/20'
+                        : isBronze
+                        ? 'border-orange-400 bg-orange-50 dark:bg-orange-900/20'
+                        : 'border-border bg-card';
+
+                      return (
+                        <div
+                          key={entry.position}
+                          className={`p-4 rounded-xl border-2 ${cardClass}`}
+                        >
+                          {entry.position > 3 && (
+                            <div className="flex justify-end mb-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="gap-1"
+                                onClick={() => removeLeaderboardPlace(entry.position)}
+                              >
+                                <Trash2 className="w-4 h-4" />
+                                Delete Place
+                              </Button>
+                            </div>
+                          )}
+                          <div className="flex items-start gap-4">
+                            <span className="text-4xl w-10 text-center">{medal ?? `#${entry.position}`}</span>
+                            <div className="flex-1 space-y-3">
+                              <Label className="font-semibold">
+                                {getOrdinalSuffix(entry.position)} Place
+                                {isGold ? ' (Gold)' : isSilver ? ' (Silver)' : isBronze ? ' (Bronze)' : ''}
+                              </Label>
+
+                              <div>
+                                <Label className="text-sm text-muted-foreground">Student</Label>
+                                <select
+                                  className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                                  value={entry.userId}
+                                  onChange={(e) => {
+                                    const selectedUserId = e.target.value;
+                                    const selectedUser = studentUsers.find((u) => u.id === selectedUserId);
+                                    updateLeaderboardEntry(entry.position, {
+                                      userId: selectedUserId,
+                                      username: selectedUser?.username ?? '',
+                                    });
+                                  }}
+                                >
+                                  <option value="">-- None --</option>
+                                  {studentUsers.map((u) => (
+                                    <option key={u.id} value={u.id}>{u.username}</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <div>
+                                <Label className="text-sm text-muted-foreground">Full name (optional)</Label>
+                                <Input
+                                  className="mt-1"
+                                  placeholder="Enter full display name"
+                                  value={entry.fullName}
+                                  onChange={(e) => updateLeaderboardEntry(entry.position, { fullName: e.target.value })}
+                                />
+                                <p className="text-xs text-muted-foreground mt-1">
+                                  Students will see full name if provided, otherwise username.
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    <Button type="button" variant="outline" className="w-full gap-2" onClick={addLeaderboardPlace}>
+                      <Plus className="w-4 h-4" />
+                      Add Next Place
+                    </Button>
+
+                    <Button
+                      onClick={saveLeaderboard}
+                      disabled={savingLb}
+                      className="w-full gap-2"
+                    >
+                      {savingLb ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                      Save Leaderboard
+                    </Button>
                   </div>
                 )}
               </CardContent>

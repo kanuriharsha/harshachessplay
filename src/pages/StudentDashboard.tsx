@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
 import { Crown, LogOut, Play, Clock, Loader2, XCircle, Users, CheckCircle, Eye } from 'lucide-react';
 import { initHealthCheck } from '@/lib/healthCheck';
+import BottomNav from '@/components/BottomNav';
 
 const StudentDashboard: React.FC = () => {
   const { user, role, signOut, loading: authLoading } = useAuth();
@@ -155,7 +156,7 @@ const StudentDashboard: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-background p-4">
+    <div className="min-h-screen bg-background p-4 pb-24 lg:pl-[17rem] lg:pb-4">
       <div className="max-w-4xl mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
@@ -360,6 +361,7 @@ const StudentDashboard: React.FC = () => {
           </CardContent>
         </Card>
       </div>
+      <BottomNav />
     </div>
   );
 };

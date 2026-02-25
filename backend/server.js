@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 const User = require('./models/User');
 const GameRequest = require('./models/GameRequest');
 const GameSession = require('./models/GameSession');
+const Leaderboard = require('./models/Leaderboard');
 const { Chess } = require('chess.js');
 
 const app = express();
@@ -1134,6 +1135,69 @@ app.post('/sessions/:id/transfer', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// ── Leaderboard endpoints ──────────────────────────────────────────────────
+// GET /leaderboard – returns admin-defined rankings
+app.get('/leaderboard', async (req, res) => {
+  try {
+    let lb = await Leaderboard.findOne({ singletonKey: 'main' }).lean().exec();
+    if (!lb) lb = { entries: [], banner: { enabled: false, playerName: '' } };
+    res.json({
+      entries: lb.entries || [],
+      banner: {
+        enabled: Boolean(lb.banner?.enabled),
+        playerName: typeof lb.banner?.playerName === 'string' ? lb.banner.playerName : '',
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /leaderboard – admin sets the rankings
+// body: { entries: [{ position: 1, userId: '...', username: '...', fullName: '...' }, ...], banner?: { enabled: boolean, playerName: string } }
+app.post('/leaderboard', async (req, res) => {
+  const { entries, banner } = req.body;
+  if (!Array.isArray(entries)) return res.status(400).json({ error: 'entries must be an array' });
+  try {
+    const normalizedEntries = entries
+      .map((entry) => {
+        const position = Number(entry?.position);
+        const username = typeof entry?.username === 'string' ? entry.username.trim() : '';
+        const fullName = typeof entry?.fullName === 'string' ? entry.fullName.trim() : '';
+        const userIdRaw = entry?.userId;
+        const userId = typeof userIdRaw === 'string' && userIdRaw.trim() ? userIdRaw.trim() : null;
+        return { position, userId, username, fullName };
+      })
+      .filter((entry) => Number.isInteger(entry.position) && entry.position > 0)
+      .sort((a, b) => a.position - b.position);
+
+    const dedupedByPosition = [];
+    const seenPositions = new Set();
+    for (const entry of normalizedEntries) {
+      if (seenPositions.has(entry.position)) continue;
+      seenPositions.add(entry.position);
+      dedupedByPosition.push(entry);
+    }
+
+    const normalizedBanner = {
+      enabled: Boolean(banner?.enabled),
+      playerName: typeof banner?.playerName === 'string' ? banner.playerName.trim() : '',
+    };
+
+    const lb = await Leaderboard.findOneAndUpdate(
+      { singletonKey: 'main' },
+      { entries: dedupedByPosition, banner: normalizedBanner, updatedAt: new Date() },
+      { upsert: true, new: true, runValidators: true }
+    ).exec();
+    res.json({ entries: lb.entries, banner: lb.banner });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+// ────────────────────────────────────────────────────────────────────────────
 
 const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 

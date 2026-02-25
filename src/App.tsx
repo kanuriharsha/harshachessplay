@@ -13,6 +13,7 @@ import AdminDashboard from "./pages/AdminDashboard";
 import Game from "./pages/Game";
 import SpectatorGames from "./pages/SpectatorGames";
 import NotFound from "./pages/NotFound";
+import Leaderboard from "./pages/Leaderboard";
 
 const queryClient = new QueryClient();
 
@@ -34,6 +35,7 @@ const App = () => (
               <Route path="/admin" element={<AdminDashboard />} />
               <Route path="/game" element={<Game />} />
               <Route path="/spectate" element={<SpectatorGames />} />
+              <Route path="/leaderboard" element={<Leaderboard />} />
               <Route path="*" element={<NotFound />} />
             </Routes>
             </SocketProvider>
