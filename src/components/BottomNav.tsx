@@ -39,8 +39,8 @@ const BottomNav: React.FC = () => {
             <Crown className="w-6 h-6 text-sidebar-primary-foreground" />
           </div>
           <div className="leading-snug">
-            <p className="text-base font-bold text-sidebar-foreground">Chess Coach</p>
-            <p className="text-xs text-sidebar-foreground/55">Learn. Play. Master.</p>
+            <p className="text-base font-bold text-sidebar-foreground">Chess Play</p>
+            <p className="text-xs text-sidebar-foreground/55">Master your Mind</p>
           </div>
         </div>
 
