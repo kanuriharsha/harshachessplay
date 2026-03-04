@@ -7,7 +7,8 @@ interface EndGameModalProps {
   onGoBack: () => void;
   gameStatus?: string;
   lastMove?: { from: string; to: string } | null;
-  gameEndReason?: 'checkmate' | 'timeout' | 'resign' | 'draw' | 'stalemate' | null;
+  gameEndReason?: 'checkmate' | 'timeout' | 'resign' | 'draw' | 'stalemate'
+              | 'threefold' | 'insufficient_material' | 'dead_position' | 'fifty_move' | null;
   onAnalyze?: () => void;
 }
 
@@ -138,8 +139,13 @@ export const EndGameModal: React.FC<EndGameModalProps> = ({ result, onGoBack, ga
                   {gameEndReason === 'checkmate' ? 'Checkmate' :
                    gameEndReason === 'timeout' ? 'Time Expired' :
                    gameEndReason === 'resign' ? 'Resignation' :
-                   gameEndReason === 'draw' ? 'Draw Agreed' :
-                   gameEndReason === 'stalemate' ? 'Stalemate' : gameEndReason}
+                   gameEndReason === 'draw' ? 'Draw Agreed 🤝' :
+                   gameEndReason === 'stalemate' ? 'Stalemate ♟️' :
+                   gameEndReason === 'threefold' ? 'Threefold Repetition 🔁' :
+                   gameEndReason === 'insufficient_material' ? 'Insufficient Material 👑' :
+                   gameEndReason === 'dead_position' ? 'Dead Position / 50-Move Rule ⏳' :
+                   gameEndReason === 'fifty_move' ? '50-Move Rule ⏳' :
+                   gameEndReason}
                 </span>
               </div>
             )}

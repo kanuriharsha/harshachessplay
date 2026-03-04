@@ -1,6 +1,43 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Chess } from 'chess.js';
+
+// ─── Client-side draw detection helpers (run entirely in the browser) ──────────
+
+/** Extracts the position-comparable part of a FEN (board + turn + castling + en-passant). */
+const getPositionKey = (fen: string): string => fen.split(' ').slice(0, 4).join(' ');
+
+/**
+ * Checks all draw conditions locally:
+ *  1. Stalemate – current player has no legal moves and is not in check
+ *  2. Threefold repetition – using the caller-maintained position history
+ *  3. Insufficient material – K vs K, K+B vs K, K+N vs K, K+B vs K+B (same colour)
+ *  4. Dead position / 50-move rule – caught by chess.js isDraw() as a fallback
+ *
+ * @param chess    The chess.js instance AFTER the move has been applied
+ * @param history  Array of position keys (getPositionKey) accumulated so far
+ */
+const checkClientDraw = (
+  chess: Chess,
+  history: string[]
+): { isDraw: boolean; reason: string } => {
+  // 1. Stalemate
+  if (chess.isStalemate()) return { isDraw: true, reason: 'stalemate' };
+
+  // 2. Threefold repetition (own history – survives Chess instance re-creation)
+  const posKey = getPositionKey(chess.fen());
+  const occurrences = history.filter(k => k === posKey).length;
+  if (occurrences >= 3) return { isDraw: true, reason: 'threefold' };
+
+  // 3. Insufficient material
+  if (chess.isInsufficientMaterial()) return { isDraw: true, reason: 'insufficient_material' };
+
+  // 4. 50-move rule or any other draw chess.js detects (dead position)
+  if (chess.isDraw()) return { isDraw: true, reason: 'dead_position' };
+
+  return { isDraw: false, reason: '' };
+};
+// ────────────────────────────────────────────────────────────────────────────
 import { useAuth } from '@/contexts/AuthContext';
 import { ChessBoard } from '@/components/chess/ChessBoard';
 import { PlayerInfo, GameStatus } from '@/components/chess/GameInfo';
@@ -60,6 +97,12 @@ const Game: React.FC = () => {
   const [gameEndDetails, setGameEndDetails] = useState<{ reason?: string; status?: string }>({});
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showDrawRequest, setShowDrawRequest] = useState(false);
+
+  // ── Client-side draw detection ──────────────────────────────────────────────
+  // Ref (not state) so closures always see the latest value without re-renders.
+  // Stores getPositionKey(fen) of every position reached in the game.
+  const positionHistoryRef = useRef<string[]>([]);
+  // ────────────────────────────────────────────────────────────────────────────
   
   // Board snapshot history for simple undo in friendly matches
   const [boardSnapshots, setBoardSnapshots] = useState<string[]>([]); // Array of FEN strings
@@ -127,6 +170,10 @@ const Game: React.FC = () => {
       setSession(sessionData);
       // If fen is missing, initialize to starting position
       setGame(new Chess(sessionData.fen ?? undefined));
+      // Seed position history with the starting FEN so threefold rep tracking is correct
+      positionHistoryRef.current = [
+        getPositionKey(sessionData.fen ?? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -'),
+      ];
       setAdminTime(sessionData.adminTimeMs ?? 600000);
       setStudentTime(sessionData.studentTimeMs ?? 600000);
       setPlayer1Time(sessionData.player1TimeMs ?? 600000);
@@ -230,6 +277,30 @@ const Game: React.FC = () => {
           }
 
           setGame(newGameState);
+
+          // ── Client-side draw detection for remote (opponent) moves ────────────
+          // Only update history when this is NOT an echo of our own move
+          // (we already updated positionHistoryRef inside handleMove for our moves).
+          if (!isOurMove) {
+            const remPosKey = getPositionKey(newGameState.fen());
+            positionHistoryRef.current = [...positionHistoryRef.current, remPosKey];
+            const remDrawCheck = checkClientDraw(newGameState, positionHistoryRef.current);
+            if (remDrawCheck.isDraw) {
+                try {
+                  const sid = data.sessionId || session?._id;
+                  if (sid) endHandledRef.current[sid] = true;
+                } catch (err) {}
+              // The player who made the move saves the result to the backend.
+              // This client only needs to show the popup.
+              setGameResult('draw');
+              setGameStatus('Game drawn!');
+              setGameEndDetails({ reason: remDrawCheck.reason, status: 'Game drawn' });
+              if (timerRef.current) clearInterval(timerRef.current);
+              setBoardSnapshots([]);
+              setCanUndo(false);
+            }
+          }
+          // ─────────────────────────────────────────────────────────────────────
         
         // Save board snapshot for friendly matches when a move occurred
         if (session?.gameMode === 'friendly' && data.lastMove) {
@@ -760,13 +831,30 @@ const Game: React.FC = () => {
         }
         // Don't set final modal locally; wait for server to broadcast authoritative game-ended
         if (timerRef.current) clearInterval(timerRef.current);
-      } else if (newGame.isDraw()) {
-        status = 'completed';
-        winner = 'draw';
-        // wait for server to broadcast draw result
-        if (timerRef.current) clearInterval(timerRef.current);
-      } else if (newGame.isCheck()) {
-        toast.warning('Check!');
+      } else {
+        // ── Client-side draw detection (runs entirely in the browser) ────────────
+        const posKey = getPositionKey(newGame.fen());
+        positionHistoryRef.current = [...positionHistoryRef.current, posKey];
+
+        const drawCheck = checkClientDraw(newGame, positionHistoryRef.current);
+        if (drawCheck.isDraw) {
+          status = 'completed';
+          winner = 'draw';
+          if (timerRef.current) clearInterval(timerRef.current);
+          // Immediately show draw popup – no server round-trip needed
+          try {
+            (window as any).__endHandledRef = (window as any).__endHandledRef || { current: {} };
+            if (session?._id) (window as any).__endHandledRef.current[session._id] = true;
+          } catch (err) {}
+          setGameResult('draw');
+          setGameStatus('Game drawn!');
+          setGameEndDetails({ reason: drawCheck.reason, status: 'Game drawn' });
+          setBoardSnapshots([]);
+          setCanUndo(false);
+        } else if (newGame.isCheck()) {
+          toast.warning('Check!');
+        }
+        // ─────────────────────────────────────────────────────────────────────
       }
 
       const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
@@ -943,10 +1031,39 @@ const Game: React.FC = () => {
   const handleAcceptDraw = () => {
     if (isSpectator) return;
     if (!session) return;
-    socket.respondDraw(session._id, true);
-    setShowDrawRequest(false);
-    toast.info('Draw accepted — waiting for server confirmation');
+
+    // Stop the clock
     if (timerRef.current) clearInterval(timerRef.current);
+    setShowDrawRequest(false);
+
+    // ── Immediately show draw popup (no server round-trip needed) ─────────────
+    try {
+      (window as any).__endHandledRef = (window as any).__endHandledRef || { current: {} };
+      if (session?._id) (window as any).__endHandledRef.current[session._id] = true;
+    } catch (err) {}
+    setGameResult('draw');
+    setGameStatus('Draw agreed!');
+    setGameEndDetails({ reason: 'draw', status: 'Draw agreed' });
+    setBoardSnapshots([]);
+    setCanUndo(false);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Notify the other player and persist the result once
+    socket.respondDraw(session._id, true);
+    // Send game-ended so the opponent's browser also shows the draw popup
+    socket.sendGameEnded?.({
+      sessionId: session._id,
+      result: 'draw',
+      winner: 'draw',
+      drawReason: 'draw',
+    });
+    // Persist to database (single API call)
+    const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
+    fetch(`${API}/sessions/${session._id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'completed', winner: 'draw' }),
+    }).catch(err => console.error('Failed to save draw result:', err));
   };
 
   const handleDeclineDraw = () => {
@@ -1117,7 +1234,7 @@ const Game: React.FC = () => {
                 className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
               >
                 <Handshake className="w-4 h-4" />
-                Request Draw
+                Offer Draw ✋
               </Button>
               {session?.gameMode === 'friendly' && role === 'admin' && (
                 <Button
