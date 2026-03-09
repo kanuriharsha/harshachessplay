@@ -1220,6 +1220,29 @@ const socketToUser = {}; // { [socketId]: userId }
 const sessionMoveQueues = {}; // { [sessionId]: Array<moveData> }
 const sessionProcessing = {}; // { [sessionId]: boolean }
 
+// Helper to emit an event to a session room and to each known socket for that session.
+// This is defensive: if a socket somehow isn't in the room, emitting directly
+// to the socket id ensures delivery to all participants (players + spectators).
+function emitToSession(sessionId, event, payload) {
+  try {
+    io.to(sessionId).emit(event, payload);
+  } catch (e) {}
+  const ss = sessionSockets[sessionId];
+  if (!ss) return;
+  const targets = [];
+  if (ss.admin) targets.push(ss.admin);
+  if (ss.student) targets.push(ss.student);
+  if (ss.player1) targets.push(ss.player1);
+  if (ss.player2) targets.push(ss.player2);
+  if (ss.spectators && Array.isArray(ss.spectators)) targets.push(...ss.spectators);
+  targets.forEach(sid => {
+    if (!sid) return;
+    try {
+      io.to(sid).emit(event, payload);
+    } catch (e) {}
+  });
+}
+
 // Helper: map a session and a role string to a userId when possible
 function getUserIdByRole(session, role) {
   if (!role || !session) return null;
@@ -1405,7 +1428,7 @@ io.on('connection', (socket) => {
       session.winner = winnerId || winnerRole || 'opponent';
       await session.save();
 
-      io.to(sessionId).emit('game-ended', { result: 'timeout', winner: session.winner, winnerId, loserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id, timedOutRole });
+      emitToSession(sessionId, 'game-ended', { result: 'timeout', winner: session.winner, winnerId, loserId, sessionId: session._id.toString(), adminId: session.adminId, student1Id: session.student1Id, studentTimeMs: session.studentTimeMs, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id, timedOutRole });
       // keep session in DB for admin review
     } catch (err) {
       console.error('Timeout handler error:', err);
@@ -1449,7 +1472,7 @@ io.on('connection', (socket) => {
           session.winner = 'draw';
           await session.save();
           console.log(`[DRAW ACCEPTED] Emitting game-ended for session ${sessionId}`);
-          io.to(sessionId).emit('game-ended', { result: 'draw', winner: 'draw', winnerId: null, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id });
+          emitToSession(sessionId, 'game-ended', { result: 'draw', winner: 'draw', winnerId: null, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id });
           // keep session in DB so admin/spectators can review results later
         }
       } else {
@@ -1502,7 +1525,7 @@ io.on('connection', (socket) => {
         session.winner = winnerId || (resignerRole === 'admin' ? 'student' : (resignerRole === 'student' ? 'admin' : 'opponent'));
         await session.save();
 
-        io.to(sessionId).emit('game-ended', { result: 'resign', winner: session.winner, winnerId, loserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id });
+        emitToSession(sessionId, 'game-ended', { result: 'resign', winner: session.winner, winnerId, loserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id });
         // keep session record for auditing
       }
     } catch (err) {
@@ -1600,7 +1623,7 @@ io.on('connection', (socket) => {
       const player1Id = session.player1Id || null;
       const player2Id = session.player2Id || null;
       const loserId = winnerId ? (winnerId === player1Id ? player2Id : (winnerId === player2Id ? player1Id : null)) : null;
-      io.to(sessionId).emit('game-ended', { result: result || 'ended', winner: session.winner, winnerId, loserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id, player2Id });
+      emitToSession(sessionId, 'game-ended', { result: result || 'ended', winner: session.winner, winnerId, loserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id, player2Id });
       // keep session record for later review by admins/spectators
     } catch (err) {
       console.error('game-ended handler error:', err);
