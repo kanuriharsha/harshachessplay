@@ -307,7 +307,8 @@ const Game: React.FC = () => {
               // but do NOT finalize the game locally — wait for server validation
               // and authoritative `game-ended` broadcast.
               try {
-                toast.info('A draw condition was detected; awaiting server confirmation');
+                const reasonLabel = remDrawCheck.reason ? (remDrawCheck.reason === 'threefold' ? 'Threefold repetition' : remDrawCheck.reason.replace(/_/g, ' ')) : 'Draw';
+                toast.info(`${reasonLabel} detected; it's draw`);
               } catch (err) {}
             }
           }
@@ -856,7 +857,8 @@ const Game: React.FC = () => {
           // Do NOT finalize the game locally here. Notify user and submit
           // the update to the server; wait for server validation/broadcast.
           try {
-            toast.info('A draw condition was detected; submitting to server for validation');
+            const reasonLabel = drawCheck.reason ? (drawCheck.reason === 'threefold' ? 'Threefold repetition' : drawCheck.reason.replace(/_/g, ' ')) : 'Draw';
+            toast.info(`${reasonLabel} detected; it's a draw`);
           } catch (err) {}
         } else if (newGame.isCheck()) {
           toast.warning('Check!');
@@ -977,7 +979,11 @@ const Game: React.FC = () => {
       setGame(new Chess(previousFen));
       setBoardSnapshots(newSnapshots);
       setCanUndo(newSnapshots.length > 1); // Can undo if more than initial position remains
-      //ok
+
+      // Roll back position history so the undone position doesn't count
+      // towards threefold repetition detection
+      positionHistoryRef.current = positionHistoryRef.current.slice(0, newSnapshots.length);
+
       // Send undo to server and other clients
       socket.sendUndo({ sessionId: session._id, fen: previousFen });
       
