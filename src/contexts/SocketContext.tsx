@@ -66,6 +66,11 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       window.dispatchEvent(new CustomEvent('app:game-update', { detail: data }));
     });
 
+    socket.on('undo-applied', (data: any) => {
+      console.log('[SOCKET] Received undo-applied:', { sessionId: data.sessionId, fen: data.fen?.substring(0, 30) });
+      window.dispatchEvent(new CustomEvent('app:undo-applied', { detail: data }));
+    });
+
     socket.on('draw-request-received', (data: any) => {
       window.dispatchEvent(new CustomEvent('app:draw-request', { detail: data }));
     });

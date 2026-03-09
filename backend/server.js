@@ -1449,7 +1449,10 @@ io.on('connection', (socket) => {
       session.fen = fen;
       session.lastMoveAt = new Date();
       await session.save();
-      io.to(sessionId).emit('game-update', { sessionId: session._id.toString(), fen: session.fen, turn: session.turn, adminTimeMs: session.adminTimeMs, studentTimeMs: session.studentTimeMs, lastMove: null });
+      // Emit a dedicated undo event so clients can roll back their in-memory
+      // position history and board snapshot stacks instead of treating this
+      // as a normal move update.
+      emitToSession(sessionId, 'undo-applied', { sessionId: session._id.toString(), fen: session.fen, turn: session.turn, adminTimeMs: session.adminTimeMs, studentTimeMs: session.studentTimeMs });
     } catch (err) {
       console.error('Undo error:', err);
     }

@@ -339,6 +339,38 @@ const Game: React.FC = () => {
       }
     };
 
+    const onUndoApplied = (e: any) => {
+      const data = e.detail;
+      if (!data) return;
+      // Filter by session ID
+      if (session && data.sessionId && data.sessionId !== session._id) return;
+
+      // Update board to server-provided FEN
+      try {
+        const newGameState = new Chess(data.fen);
+        setGame(newGameState);
+      } catch (err) {
+        setGame(new Chess(data.fen));
+      }
+
+      // Roll back our boardSnapshots and position history to match the undone state
+      setBoardSnapshots(prev => {
+        let newSnapshots = [...prev];
+        if (newSnapshots.length > 1) {
+          newSnapshots.pop();
+        } else {
+          newSnapshots = [data.fen];
+        }
+        // Trim position history to the same length so undone positions are not counted
+        positionHistoryRef.current = positionHistoryRef.current.slice(0, newSnapshots.length);
+        setCanUndo(newSnapshots.length > 1);
+        return newSnapshots;
+      });
+
+      // Clear last remote move highlight
+      setRemoteLastMove(null);
+    };
+
     const onDrawRequest = (e: any) => {
       const data = e.detail;
       // Filter by session ID
@@ -559,6 +591,10 @@ const Game: React.FC = () => {
       spectatorSocket.on('game-ended', (data: any) => {
         onGameEnded({ detail: data });
       });
+
+      spectatorSocket.on('undo-applied', (data: any) => {
+        onUndoApplied({ detail: data });
+      });
       
       spectatorSocket.on('session-reattached', (data: any) => {
         onSessionReattached({ detail: data });
@@ -587,6 +623,7 @@ const Game: React.FC = () => {
       console.log('[Game] Setting up player window event listeners');
       
       window.addEventListener('app:game-update', onGameUpdate as EventListener);
+      window.addEventListener('app:undo-applied', onUndoApplied as EventListener);
       window.addEventListener('app:draw-request', onDrawRequest as EventListener);
       window.addEventListener('app:draw-declined', onDrawDeclined as EventListener);
       window.addEventListener('app:game-ended', onGameEnded as EventListener);
@@ -599,6 +636,7 @@ const Game: React.FC = () => {
       return () => {
         console.log('[Game] Cleaning up player window event listeners');
         window.removeEventListener('app:game-update', onGameUpdate as EventListener);
+        window.removeEventListener('app:undo-applied', onUndoApplied as EventListener);
         window.removeEventListener('app:draw-request', onDrawRequest as EventListener);
         window.removeEventListener('app:draw-declined', onDrawDeclined as EventListener);
         window.removeEventListener('app:game-ended', onGameEnded as EventListener);
