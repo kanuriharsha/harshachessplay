@@ -815,6 +815,7 @@ const Game: React.FC = () => {
     try {
       // store previous fen to allow undo (friendly mode)
       setPrevFen(game.fen());
+      let drawReason: string | undefined = undefined;
       const newGame = new Chess(game.fen());
       const move = newGame.move({ from, to, promotion: promotion || 'q' });
 
