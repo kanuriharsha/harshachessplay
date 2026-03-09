@@ -227,7 +227,6 @@ const Game: React.FC = () => {
   useEffect(() => {
     if (session?._id && !isSpectator) {
       try {
-        let drawReason: string | undefined = undefined;
         socket.joinSession(session._id, false);
       } catch (err) {
         console.error('Failed to join session via socket', err);
@@ -813,9 +812,9 @@ const Game: React.FC = () => {
     }
 
     try {
+      let drawReason: string | undefined = undefined;
       // store previous fen to allow undo (friendly mode)
       setPrevFen(game.fen());
-      let drawReason: string | undefined = undefined;
       const newGame = new Chess(game.fen());
       const move = newGame.move({ from, to, promotion: promotion || 'q' });
 

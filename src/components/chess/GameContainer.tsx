@@ -81,6 +81,7 @@ export const GameContainer: React.FC<GameContainerProps> = ({
           setGameStatus(`Checkmate! ${currentTurn === 'w' ? 'White' : 'Black'} wins!`);
           toast.success('Checkmate!');
         } else if (newGame.isDraw()) {
+<<<<<<< HEAD
           // Ignore draws caused solely by the 50-move rule (halfmove clock >= 100)
           let treatAsDraw = true;
           try {
@@ -98,6 +99,11 @@ export const GameContainer: React.FC<GameContainerProps> = ({
             setGameStatus('Game drawn!');
             toast.info('Game is a draw');
           }
+=======
+          setIsGameActive(false);
+          setGameStatus('Game drawn!');
+          toast.info('Game is a draw');
+>>>>>>> 4337f285794fc1ebf6f3b6386a9363bb61d2c82a
         } else if (newGame.isCheck()) {
           toast.warning('Check!');
         }
