@@ -127,6 +127,8 @@ const Game: React.FC = () => {
   
   // Track last applied move to prevent double application
   const lastAppliedMoveRef = useRef<string | null>(null);
+  // Track last locally-initiated undo so we can ignore the server echo
+  const lastUndoRef = useRef<string | null>(null);
   
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const lastTickRef = useRef<number>(Date.now());
@@ -344,6 +346,13 @@ const Game: React.FC = () => {
       if (!data) return;
       // Filter by session ID
       if (session && data.sessionId && data.sessionId !== session._id) return;
+
+      // If we initiated this undo locally, ignore the server echo once.
+      if (lastUndoRef.current && data.fen === lastUndoRef.current) {
+        // clear the marker and skip applying (we already applied locally)
+        lastUndoRef.current = null;
+        return;
+      }
 
       // Update board to server-provided FEN
       try {
@@ -1023,6 +1032,9 @@ const Game: React.FC = () => {
       positionHistoryRef.current = positionHistoryRef.current.slice(0, newSnapshots.length);
 
       // Send undo to server and other clients
+      // Mark this undo locally so when the server echoes the undo-applied
+      // event back to the sender we don't apply it a second time.
+      lastUndoRef.current = previousFen;
       socket.sendUndo({ sessionId: session._id, fen: previousFen });
       
       toast.success('Move undone');
