@@ -109,8 +109,8 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
     });
 
-    socket.on('draw-declined', () => {
-      window.dispatchEvent(new CustomEvent('app:draw-declined'));
+    socket.on('draw-declined', (data: any) => {
+      window.dispatchEvent(new CustomEvent('app:draw-declined', { detail: data }));
     });
 
     socket.on('game-ended', (data: any) => {

@@ -1219,28 +1219,18 @@ const socketToUser = {}; // { [socketId]: userId }
 // Per-session move queues to ensure sequential processing and avoid race conditions
 const sessionMoveQueues = {}; // { [sessionId]: Array<moveData> }
 const sessionProcessing = {}; // { [sessionId]: boolean }
+// Track pending draw requests: { [sessionId]: requesterId (userId) }
+const pendingDrawRequests = {};
 
-// Helper to emit an event to a session room and to each known socket for that session.
-// This is defensive: if a socket somehow isn't in the room, emitting directly
-// to the socket id ensures delivery to all participants (players + spectators).
+// Helper to emit an event to all sockets in a session room.
+// Uses room broadcast only — all participants (players + spectators) join
+// the room on connect/register, so a single io.to() is sufficient.
 function emitToSession(sessionId, event, payload) {
   try {
     io.to(sessionId).emit(event, payload);
-  } catch (e) {}
-  const ss = sessionSockets[sessionId];
-  if (!ss) return;
-  const targets = [];
-  if (ss.admin) targets.push(ss.admin);
-  if (ss.student) targets.push(ss.student);
-  if (ss.player1) targets.push(ss.player1);
-  if (ss.player2) targets.push(ss.player2);
-  if (ss.spectators && Array.isArray(ss.spectators)) targets.push(...ss.spectators);
-  targets.forEach(sid => {
-    if (!sid) return;
-    try {
-      io.to(sid).emit(event, payload);
-    } catch (e) {}
-  });
+  } catch (e) {
+    console.error('emitToSession error:', e);
+  }
 }
 
 // Helper: map a session and a role string to a userId when possible
@@ -1460,23 +1450,44 @@ io.on('connection', (socket) => {
 
   socket.on('draw-request', (data) => {
     const { sessionId, fromRole } = data;
-    console.log(`[DRAW REQUEST] From ${fromRole} in session ${sessionId}`);
+    const requesterId = socketToUser[socket.id] || null;
+    console.log(`[DRAW REQUEST] From ${fromRole} (user ${requesterId}) in session ${sessionId}`);
+    if (!sessionId || !requesterId) return;
+    // Record who requested the draw so we can validate the response
+    pendingDrawRequests[sessionId] = requesterId;
     socket.to(sessionId).emit('draw-request-received', { sessionId, fromRole });
   });
 
   socket.on('draw-response', async (data) => {
     const { sessionId, accepted } = data;
-    console.log(`[DRAW RESPONSE] Session ${sessionId}, accepted=${accepted}`);
+    const responderId = socketToUser[socket.id] || null;
+    console.log(`[DRAW RESPONSE] Session ${sessionId}, accepted=${accepted}, responder=${responderId}`);
     try {
+      // Validate: a draw request must be pending for this session
+      if (!pendingDrawRequests[sessionId]) {
+        console.warn(`[DRAW RESPONSE] No pending draw request for session ${sessionId} — ignoring`);
+        io.to(socket.id).emit('draw-error', { sessionId, error: 'No pending draw request' });
+        return;
+      }
+      // Validate: the responder must NOT be the same person who requested the draw
+      if (responderId && pendingDrawRequests[sessionId] === responderId) {
+        console.warn(`[DRAW RESPONSE] Requester ${responderId} tried to accept their own draw request — ignoring`);
+        io.to(socket.id).emit('draw-error', { sessionId, error: 'Cannot accept your own draw request' });
+        return;
+      }
+      // Clear the pending request regardless of accept/decline
+      delete pendingDrawRequests[sessionId];
+
       if (accepted) {
         const session = await GameSession.findById(sessionId).exec();
-        if (session) {
+        if (session && session.status === 'active') {
           session.status = 'completed';
           session.winner = 'draw';
           await session.save();
-          console.log(`[DRAW ACCEPTED] Emitting game-ended for session ${sessionId}`);
+          console.log(`[DRAW ACCEPTED] Both parties agreed — emitting game-ended for session ${sessionId}`);
           emitToSession(sessionId, 'game-ended', { result: 'draw', winner: 'draw', winnerId: null, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id: session.player1Id, player2Id: session.player2Id });
-          // keep session in DB so admin/spectators can review results later
+        } else {
+          console.warn(`[DRAW ACCEPTED] Session ${sessionId} not found or not active`);
         }
       } else {
         console.log(`[DRAW DECLINED] Notifying session ${sessionId}`);
@@ -1490,6 +1501,8 @@ io.on('connection', (socket) => {
   socket.on('resign', async (data) => {
     const { sessionId, resignerRole } = data;
     console.log(`[RESIGN] User resigned: role=${resignerRole}, session=${sessionId}`);
+    // Clear any pending draw request for this session
+    delete pendingDrawRequests[sessionId];
     try {
       const session = await GameSession.findById(sessionId).exec();
       if (session) {
@@ -1540,6 +1553,8 @@ io.on('connection', (socket) => {
   socket.on('game-ended', async (data) => {
     const { sessionId, result, winner } = data || {};
     if (!sessionId) return;
+    // Clear any pending draw request for this session
+    delete pendingDrawRequests[sessionId];
     try {
       const session = await GameSession.findById(sessionId).exec();
       if (!session) return;

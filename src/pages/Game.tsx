@@ -105,7 +105,6 @@ const Game: React.FC = () => {
   const [studentTime, setStudentTime] = useState(600000);
   const [player1Time, setPlayer1Time] = useState(600000);
   const [player2Time, setPlayer2Time] = useState(600000);
-  const [prevFen, setPrevFen] = useState<string | null>(null);
   const [gameStatus, setGameStatus] = useState('');
   const [loading, setLoading] = useState(true);
   const location = useLocation();
@@ -861,8 +860,6 @@ const Game: React.FC = () => {
 
     try {
       let drawReason: string | undefined = undefined;
-      // store previous fen to allow undo (friendly mode)
-      setPrevFen(game.fen());
       const newGame = new Chess(game.fen());
       const move = newGame.move({ from, to, promotion: promotion || 'q' });
 
@@ -938,8 +935,6 @@ const Game: React.FC = () => {
 
       if (!res.ok) {
         console.error('Error updating game');
-        // Server rejected move — clear prevFen (no optimistic state applied)
-        setPrevFen(null);
         toast.error('Move rejected by server');
         return false;
       }
@@ -1100,38 +1095,14 @@ const Game: React.FC = () => {
     if (isSpectator) return;
     if (!session) return;
 
-    // Stop the clock
-    if (timerRef.current) clearInterval(timerRef.current);
     setShowDrawRequest(false);
 
-    // ── Immediately show draw popup (no server round-trip needed) ─────────────
-    try {
-      (window as any).__endHandledRef = (window as any).__endHandledRef || { current: {} };
-      if (session?._id) (window as any).__endHandledRef.current[session._id] = true;
-    } catch (err) {}
-    setGameResult('draw');
-    setGameStatus('Draw agreed!');
-    setGameEndDetails({ reason: 'draw', status: 'Draw agreed' });
-    setBoardSnapshots([]);
-    setCanUndo(false);
-    // ─────────────────────────────────────────────────────────────────────────
-
-    // Notify the other player and persist the result once
+    // Notify the server that we accepted the draw.
+    // The server validates that a draw request is pending and that both parties
+    // agreed before broadcasting game-ended. We do NOT finalize locally —
+    // wait for the authoritative server broadcast.
     socket.respondDraw(session._id, true);
-    // Send game-ended so the opponent's browser also shows the draw popup
-    socket.sendGameEnded?.({
-      sessionId: session._id,
-      result: 'draw',
-      winner: 'draw',
-      drawReason: 'draw',
-    });
-    // Persist to database (single API call)
-    const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
-    fetch(`${API}/sessions/${session._id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'completed', winner: 'draw' }),
-    }).catch(err => console.error('Failed to save draw result:', err));
+    toast.info('Draw accepted — waiting for server confirmation');
   };
 
   const handleDeclineDraw = () => {
