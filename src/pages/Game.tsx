@@ -197,15 +197,10 @@ const Game: React.FC = () => {
       setPlayer1Time(sessionData.player1TimeMs ?? 600000);
       setPlayer2Time(sessionData.player2TimeMs ?? 600000);
       
-      // Initialize board snapshots for friendly matches
-      if (sessionData.gameMode === 'friendly') {
-        const currentFen = sessionData.fen ?? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-        setBoardSnapshots([currentFen]); // Start with current position
-        setCanUndo(false); // Can't undo from initial position
-      } else {
-        setBoardSnapshots([]);
-        setCanUndo(false);
-      }
+      // Initialize board snapshot buffer (used by admin for undo in all game modes)
+      const currentFen = sessionData.fen ?? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+      setBoardSnapshots([currentFen]);
+      setCanUndo(false);
       
       setLoading(false);
     } catch (err) {
@@ -315,12 +310,14 @@ const Game: React.FC = () => {
           }
           // ─────────────────────────────────────────────────────────────────────
         
-        // Save board snapshot for friendly matches when a move occurred
-        if (session?.gameMode === 'friendly' && data.lastMove) {
+        // Save board snapshot when a move occurred (admin uses this for undo in any mode)
+        if (data.lastMove) {
           setBoardSnapshots(prev => {
-            const newSnapshots = [...prev, data.fen];
-            setCanUndo(newSnapshots.length > 1); // Enable undo if we have more than initial position
-            return newSnapshots;
+            // Keep a rolling buffer of the last 21 positions (20 half-moves + current)
+            const next = [...prev, data.fen];
+            const capped = next.length > 21 ? next.slice(next.length - 21) : next;
+            setCanUndo(capped.length > 1);
+            return capped;
           });
         }
         } catch (err) {
@@ -604,6 +601,8 @@ const Game: React.FC = () => {
         onUndoApplied({ detail: data });
       });
       
+      // Note: no return needed here; undo-applied cleanup handled in the cleanup fn below
+      
       spectatorSocket.on('session-reattached', (data: any) => {
         onSessionReattached({ detail: data });
       });
@@ -619,6 +618,7 @@ const Game: React.FC = () => {
       return () => {
         console.log('[Game] Cleaning up spectator socket event handlers');
         spectatorSocket.off('game-update');
+        spectatorSocket.off('undo-applied');
         spectatorSocket.off('draw-request-received');
         spectatorSocket.off('draw-declined');
         spectatorSocket.off('game-ended');
@@ -996,48 +996,50 @@ const Game: React.FC = () => {
   }, [game, session, role, adminTime, studentTime, player1Time, player2Time, user?.id, socket, isSpectator, timerRef]);
 
   const handleUndo = useCallback(async () => {
-    if (isSpectator) {
-      toast.error("Spectators cannot undo moves");
+    // Only admin can undo; regular spectators cannot
+    if (role !== 'admin') {
+      toast.error("Only the coach can undo moves");
       return;
     }
-    if (!session || session.gameMode !== 'friendly' || role !== 'admin' || boardSnapshots.length <= 1) {
-      return; // Can only undo in friendly matches as admin with moves to undo
+    if (!session || boardSnapshots.length <= 1) {
+      return; // No moves to undo
     }
     
     try {
-      // Remove the last snapshot (current position)
+      // Pop the most recent snapshot — this reverts the last single half-move
       const newSnapshots = [...boardSnapshots];
       newSnapshots.pop();
       
-      if (newSnapshots.length === 0) {
-        // Should not happen, but safety check
-        return;
-      }
+      if (newSnapshots.length === 0) return;
       
-      // Get the new last snapshot (previous position)
+      // The position we are reverting to
       const previousFen = newSnapshots[newSnapshots.length - 1];
       
       // Update local game state
       setGame(new Chess(previousFen));
       setBoardSnapshots(newSnapshots);
-      setCanUndo(newSnapshots.length > 1); // Can undo if more than initial position remains
+      setCanUndo(newSnapshots.length > 1);
 
-      // Roll back position history so the undone position doesn't count
-      // towards threefold repetition detection
+      // Trim position history to match the new snapshot length
       positionHistoryRef.current = positionHistoryRef.current.slice(0, newSnapshots.length);
 
-      // Send undo to server and other clients
-      // Mark this undo locally so when the server echoes the undo-applied
-      // event back to the sender we don't apply it a second time.
+      // Mark locally so the server echo is ignored (prevent double-apply)
       lastUndoRef.current = previousFen;
-      socket.sendUndo({ sessionId: session._id, fen: previousFen });
+
+      // Send to server — include byAdmin flag so server allows non-friendly games
+      const undoPayload = { sessionId: session._id, fen: previousFen, byAdmin: true };
+      if (isSpectator) {
+        spectatorSocket.sendUndo(undoPayload);
+      } else {
+        socket.sendUndo(undoPayload);
+      }
       
       toast.success('Move undone');
     } catch (err) {
       console.error('Undo failed', err);
       toast.error('Failed to undo move');
     }
-  }, [session, boardSnapshots, role, socket]);
+  }, [session, boardSnapshots, role, socket, isSpectator, spectatorSocket]);
 
   const handleResign = async () => {
     if (isSpectator) {
@@ -1275,7 +1277,7 @@ const Game: React.FC = () => {
                 <Handshake className="w-4 h-4" />
                 Offer Draw ✋
               </Button>
-              {session?.gameMode === 'friendly' && role === 'admin' && (
+              {session?.gameMode === 'friendly' && role === 'admin' && isGameActive && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -1298,12 +1300,24 @@ const Game: React.FC = () => {
             </>
           ) : isSpectator ? (
             <>
-              {/* Spectator mode - read-only */}
+              {/* Spectator mode - admin can undo in friendly games */}
               <div className="text-center py-4">
                 <p className="text-sm text-muted-foreground">
                   👁️ Spectating - Read-only mode
                 </p>
               </div>
+              {role === 'admin' && isGameActive && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleUndo}
+                  disabled={!canUndo}
+                  title="Undo the last single move (up to 10 full turns buffered)"
+                  className="gap-2 w-full sm:w-auto text-sm md:text-base py-5 sm:py-2"
+                >
+                  Undo Last Move
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"

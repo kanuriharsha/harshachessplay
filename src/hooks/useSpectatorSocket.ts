@@ -99,6 +99,12 @@ export const useSpectatorSocket = (sessionId: string | null) => {
       }
     });
 
+    spectatorSocket.on('undo-applied', (data: any) => {
+      if (eventHandlersRef.current['undo-applied']) {
+        eventHandlersRef.current['undo-applied'](data);
+      }
+    });
+
     spectatorSocket.on('connect_error', (err: any) => {
       console.error('[SpectatorSocket] Connect error:', err);
     });
@@ -126,10 +132,18 @@ export const useSpectatorSocket = (sessionId: string | null) => {
     delete eventHandlersRef.current[event];
   };
 
+  // Send undo via spectator socket (admin spectator privilege)
+  const sendUndo = (payload: any) => {
+    if (socketRef.current) {
+      socketRef.current.emit('undo', payload);
+    }
+  };
+
   return {
     connected,
     on,
     off,
+    sendUndo,
     socket: socketRef.current,
   };
 };

@@ -1425,14 +1425,17 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Undo move support: only allowed in friendly mode. Client must include the
-  // desired FEN to revert to (server does not reconstruct history).
+  // Undo move support: allowed in friendly mode OR when requested by admin (spectating or playing).
+  // Client must include the desired FEN to revert to (server does not reconstruct history).
   socket.on('undo', async (data) => {
-    const { sessionId, fen } = data || {};
+    const { sessionId, fen, byAdmin } = data || {};
     try {
       const session = await GameSession.findById(sessionId).exec();
       if (!session) return;
-      if (session.gameMode !== 'friendly') {
+      // Allow undo if: friendly game, OR the request comes from the admin of the session
+      const requesterId = socketToUser[socket.id] || null;
+      const isSessionAdmin = requesterId && String(session.adminId) === String(requesterId);
+      if (session.gameMode !== 'friendly' && !isSessionAdmin && !byAdmin) {
         // Not allowed
         return;
       }
