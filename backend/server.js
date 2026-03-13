@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 const User = require('./models/User');
 const GameRequest = require('./models/GameRequest');
 const GameSession = require('./models/GameSession');
+const GameMove = require('./models/GameMove');
 const Leaderboard = require('./models/Leaderboard');
 const { Chess } = require('chess.js');
 
@@ -938,13 +939,15 @@ app.patch('/sessions/:id', async (req, res) => {
   }
 });
 
-// Delete a session (admin) - removes session record from DB
+// Delete a session (admin) - removes session AND all its moves
 app.delete('/sessions/:id', async (req, res) => {
   const { id } = req.params;
   try {
     if (!mongoose.Types.ObjectId.isValid(String(id))) return res.status(400).json({ error: 'Invalid session id' });
     const deleted = await GameSession.findByIdAndDelete(id).exec();
     if (!deleted) return res.status(404).json({ error: 'Session not found' });
+    // Cascade-delete all moves for this game
+    await GameMove.deleteMany({ gameId: String(id) });
     return res.json({ success: true });
   } catch (err) {
     console.error('Error deleting session:', err);
@@ -1366,8 +1369,11 @@ io.on('connection', (socket) => {
       const { fen, turn } = data || {};
       try {
         const session = await GameSession.findById(sessionId).exec();
-        if (!session) continue;
-        // apply authoritative update
+        if (!session || session.status !== 'active') continue;
+
+        const prevFen = session.fen;
+
+        // Apply authoritative update
         if (fen !== undefined) session.fen = fen;
         if (turn !== undefined) session.turn = turn;
         if (data.adminTimeMs !== undefined) session.adminTimeMs = data.adminTimeMs;
@@ -1375,20 +1381,95 @@ io.on('connection', (socket) => {
         if (data.player1TimeMs !== undefined) session.player1TimeMs = data.player1TimeMs;
         if (data.player2TimeMs !== undefined) session.player2TimeMs = data.player2TimeMs;
         session.lastMoveAt = new Date();
-        await session.save();
 
-        const payload = {
-          sessionId: session._id.toString(),
-          fen: session.fen,
-          turn: session.turn,
-          adminTimeMs: session.adminTimeMs,
-          studentTimeMs: session.studentTimeMs,
-          player1TimeMs: session.player1TimeMs,
-          player2TimeMs: session.player2TimeMs,
-        };
-        if (data && data.lastMove) payload.lastMove = data.lastMove;
-        console.log(`[GAME-UPDATE EMIT] Emitting to room ${sessionId}, FEN: ${session.fen.substring(0, 30)}...`);
-        io.to(sessionId).emit('game-update', payload);
+        // ── Save move to GameMove collection ───────────────────────────────
+        let sanMove = '';
+        let movedColor = 'white';
+        try {
+          const prevChess = new Chess(prevFen);
+          movedColor = prevChess.turn() === 'w' ? 'white' : 'black';
+          // Find the move that was played (diff old → new FEN)
+          if (data.lastMove) {
+            const promotion = data.lastMove.promotion || 'q';
+            const made = prevChess.move({ from: data.lastMove.from, to: data.lastMove.to, promotion });
+            if (made) sanMove = made.san;
+          }
+        } catch (e) {
+          console.warn('[MOVE SAVE] Could not determine SAN:', e.message);
+        }
+
+        const moveCount = await GameMove.countDocuments({ gameId: sessionId });
+        await GameMove.create({
+          gameId: sessionId,
+          moveNumber: moveCount + 1,
+          playerColor: movedColor,
+          move: sanMove || (data.lastMove ? `${data.lastMove.from}${data.lastMove.to}` : '?'),
+          fenPosition: session.fen,
+        });
+        // ───────────────────────────────────────────────────────────────────
+
+        // ── Server-side draw detection ─────────────────────────────────────
+        let drawResult = null;
+        try {
+          const chess = new Chess(session.fen);
+
+          // a) Stalemate
+          if (chess.isStalemate()) {
+            drawResult = 'draw_stalemate';
+          }
+          // b) Insufficient material
+          else if (chess.isInsufficientMaterial()) {
+            drawResult = 'draw_insufficient';
+          }
+          // c) Threefold repetition — count matching fenPositions in DB
+          else {
+            // Normalize FEN to first 4 parts (ignore move clocks)
+            const normalizedFen = session.fen.split(' ').slice(0, 4).join(' ');
+            const allMoves = await GameMove.find({ gameId: sessionId }, 'fenPosition').lean();
+            const occurrences = allMoves.filter(m =>
+              m.fenPosition.split(' ').slice(0, 4).join(' ') === normalizedFen
+            ).length;
+            if (occurrences >= 3) {
+              drawResult = 'draw_threefold';
+            }
+          }
+        } catch (drawErr) {
+          console.warn('[DRAW CHECK] Error during draw detection:', drawErr.message);
+        }
+        // ───────────────────────────────────────────────────────────────────
+
+        if (drawResult) {
+          session.status = 'completed';
+          session.winner = drawResult;
+          await session.save();
+          console.log(`[DRAW DETECTED] Session ${sessionId}: ${drawResult}`);
+          io.to(sessionId).emit('game-ended', {
+            result: 'draw',
+            winner: drawResult,
+            drawReason: drawResult,
+            winnerId: null,
+            sessionId: session._id.toString(),
+            adminId: session.adminId,
+            studentId: session.studentId,
+            player1Id: session.player1Id,
+            player2Id: session.player2Id,
+          });
+        } else {
+          await session.save();
+          const payload = {
+            sessionId: session._id.toString(),
+            fen: session.fen,
+            turn: session.turn,
+            adminTimeMs: session.adminTimeMs,
+            studentTimeMs: session.studentTimeMs,
+            player1TimeMs: session.player1TimeMs,
+            player2TimeMs: session.player2TimeMs,
+          };
+          if (data && data.lastMove) payload.lastMove = data.lastMove;
+          if (data && data.isCheck) payload.isCheck = data.isCheck;
+          console.log(`[GAME-UPDATE EMIT] Emitting to room ${sessionId}, FEN: ${session.fen.substring(0, 30)}...`);
+          io.to(sessionId).emit('game-update', payload);
+        }
       } catch (err) {
         console.error('Move processing error for session', sessionId, err);
       }
@@ -1560,30 +1641,11 @@ io.on('connection', (socket) => {
     delete pendingDrawRequests[sessionId];
     try {
       const session = await GameSession.findById(sessionId).exec();
-      if (!session) return;
-      // If the client claims a draw, validate it server-side and explicitly
-      // ignore/decline draw claims that are based solely on the 50-move rule.
+      // Draws are now handled exclusively by processNextMove on the server.
+      // Reject any client-declared draw — the server emits game-ended when it detects a draw position.
       if (result === 'draw') {
-        const fenToCheck = (data && data.fen) || session.fen || null;
-        let validDraw = false;
-        // Allow client-declared threefold repetition (client maintains history)
-        if (data && data.drawReason === 'threefold') validDraw = true;
-        // Otherwise validate using chess.js for stalemate or insufficient material
-        if (!validDraw && fenToCheck) {
-          try {
-            const chess = new Chess(fenToCheck);
-            if (chess.isStalemate() || chess.isInsufficientMaterial()) validDraw = true;
-            // Do NOT accept chess.isDraw() here because it includes the 50-move rule
-            // which we intentionally disable for automatic draws.
-          } catch (err) {
-            console.warn('Failed to validate draw claim for session', sessionId, err);
-          }
-        }
-        if (!validDraw) {
-          console.warn('Rejected draw claim for session', sessionId, 'reason: not a validated draw (50-move disabled)');
-          io.to(socket.id).emit('game-ended-invalid', { reason: 'invalid_draw', sessionId });
-          return;
-        }
+        console.log(`[GAME-ENDED] Client-declared draw ignored for session ${sessionId} — backend handles draws via move storage.`);
+        return;
       }
       // If the client claims checkmate, validate it server-side by testing all legal moves
       if (result === 'checkmate') {
@@ -1602,41 +1664,19 @@ io.on('connection', (socket) => {
         }
 
         // Generate all legal moves for the side to move and test whether any move removes the check
-        const legalMoves = chess.moves({ verbose: true }) || [];
-        let escapeFound = false;
-        for (const mv of legalMoves) {
-          try {
-            const test = new Chess(fenToCheck);
-            const promotion = mv.promotion || 'q';
-            const made = test.move({ from: mv.from, to: mv.to, promotion });
-            if (!made) continue;
-            if (!test.isCheck()) {
-              escapeFound = true;
-              break;
-            }
-          } catch (e) {
-            // ignore move application errors and continue testing others
-            continue;
-          }
-        }
-
-        if (escapeFound) {
-          // Not a checkmate — client reported checkmate but an escaping move exists
-          console.warn('Client reported checkmate but an escaping move exists for session', sessionId);
-          // Optionally notify the reporting client that the claim was rejected
+        if (!chess.isCheckmate()) {
+          console.warn('Client reported checkmate but position is not checkmate for session', sessionId);
           io.to(socket.id).emit('game-ended-invalid', { reason: 'not_checkmate', sessionId });
           return;
         }
-
-        // All legal moves leave the king in check -> valid checkmate, fall through to finalize below
+        // Valid checkmate — fall through to finalize
       }
 
-      // Finalize the session (draw/resign/validated checkmate/etc.)
+      // Finalize the session (validated checkmate or other terminal states)
+      if (!session || session.status !== 'active') return; // already ended or not found
       session.status = 'completed';
-      // Normalize winner: could be a role ('admin','student','player1','player2') or a userId
       let winnerId = null;
       if (winner) {
-        // try to resolve role to userId
         winnerId = getUserIdByRole(session, winner) || (typeof winner === 'string' && winner.match(/^[a-fA-F0-9]{24}$/) ? winner : null);
         session.winner = winnerId || winner;
       }
@@ -1645,7 +1685,6 @@ io.on('connection', (socket) => {
       const player2Id = session.player2Id || null;
       const loserId = winnerId ? (winnerId === player1Id ? player2Id : (winnerId === player2Id ? player1Id : null)) : null;
       emitToSession(sessionId, 'game-ended', { result: result || 'ended', winner: session.winner, winnerId, loserId, sessionId: session._id.toString(), adminId: session.adminId, studentId: session.studentId, player1Id, player2Id });
-      // keep session record for later review by admins/spectators
     } catch (err) {
       console.error('game-ended handler error:', err);
     }

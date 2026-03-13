@@ -1,60 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Chess } from 'chess.js';
-
-// ─── Client-side draw detection helpers (run entirely in the browser) ──────────
-
-/** Extracts the position-comparable part of a FEN (board + turn + castling + en-passant). */
-const getPositionKey = (fen: string): string => fen.split(' ').slice(0, 4).join(' ');
-
-/**
- * Checks all draw conditions locally:
- *  1. Stalemate – current player has no legal moves and is not in check
- *  2. Threefold repetition – using the caller-maintained position history
- *  3. Insufficient material – K vs K, K+B vs K, K+N vs K, K+B vs K+B (same colour)
- *  4. Dead position / 50-move rule – caught by chess.js isDraw() as a fallback
- *
- * @param chess    The chess.js instance AFTER the move has been applied
- * @param history  Array of position keys (getPositionKey) accumulated so far
- */
-const checkClientDraw = (
-  chess: Chess,
-  history: string[]
-): { isDraw: boolean; reason: string } => {
-  // 1. Stalemate
-  if (chess.isStalemate()) return { isDraw: true, reason: 'stalemate' };
-
-  // 2. Threefold repetition (own history – survives Chess instance re-creation)
-  const posKey = getPositionKey(chess.fen());
-  const occurrences = history.filter(k => k === posKey).length;
-  if (occurrences >= 3) return { isDraw: true, reason: 'threefold' };
-
-  // 3. Insufficient material
-  if (chess.isInsufficientMaterial()) return { isDraw: true, reason: 'insufficient_material' };
-
-  // 4. Dead position detected by chess.js (but ignore 50-move rule)
-  // chess.isDraw() can return true for the 50-move rule (halfmove clock >=100),
-  // which we intentionally want to disable here. Only accept draws from
-  // chess.js if they are NOT caused by the 50-move rule.
-  if (chess.isDraw()) {
-    try {
-      const fenParts = chess.fen().split(' ');
-      const halfmoveClock = fenParts.length >= 5 ? parseInt(fenParts[4], 10) || 0 : 0;
-      // 50 full moves == 100 halfmoves; ignore draw if halfmove clock reached 100
-      if (halfmoveClock >= 100) {
-        // Treat as not-a-draw here (we purposely disable automatic 50-move draws)
-      } else {
-        return { isDraw: true, reason: 'dead_position' };
-      }
-    } catch (err) {
-      // If anything goes wrong parsing FEN, fall back to treating as draw
-      return { isDraw: true, reason: 'dead_position' };
-    }
-  }
-
-  return { isDraw: false, reason: '' };
-};
-// ────────────────────────────────────────────────────────────────────────────
 import { useAuth } from '@/contexts/AuthContext';
 import { ChessBoard } from '@/components/chess/ChessBoard';
 import { PlayerInfo, GameStatus } from '@/components/chess/GameInfo';
@@ -114,12 +60,6 @@ const Game: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showDrawRequest, setShowDrawRequest] = useState(false);
 
-  // ── Client-side draw detection ──────────────────────────────────────────────
-  // Ref (not state) so closures always see the latest value without re-renders.
-  // Stores getPositionKey(fen) of every position reached in the game.
-  const positionHistoryRef = useRef<string[]>([]);
-  // ────────────────────────────────────────────────────────────────────────────
-  
   // Board snapshot history for simple undo in friendly matches
   const [boardSnapshots, setBoardSnapshots] = useState<string[]>([]); // Array of FEN strings
   const [canUndo, setCanUndo] = useState(false);
@@ -138,6 +78,21 @@ const Game: React.FC = () => {
   // Use separate spectator socket for spectating (only initialized when spectating)
   // This creates a completely isolated socket connection that doesn't interfere with active games
   const spectatorSocket = useSpectatorSocket(isSpectator ? session?._id || null : null);
+
+  // Helper to sync authoritative server state to local state
+  const syncGameState = useCallback((data: GameSession) => {
+    setSession(data);
+    setGame(new Chess(data.fen || undefined));
+    if (data.adminTimeMs !== undefined) setAdminTime(data.adminTimeMs);
+    if (data.studentTimeMs !== undefined) setStudentTime(data.studentTimeMs);
+    if (data.player1TimeMs !== undefined) setPlayer1Time(data.player1TimeMs);
+    if (data.player2TimeMs !== undefined) setPlayer2Time(data.player2TimeMs);
+    
+    // Initialize/Sync board snapshot buffer
+    const currentFen = data.fen || 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    setBoardSnapshots([currentFen]);
+    setCanUndo(false);
+  }, []);
 
   // Fetch active session
   const fetchSession = useCallback(async () => {
@@ -185,30 +140,15 @@ const Game: React.FC = () => {
         navigate(role === 'admin' ? '/admin' : '/student');
         return;
       }
-      setSession(sessionData);
-      // If fen is missing, initialize to starting position
-      setGame(new Chess(sessionData.fen ?? undefined));
-      // Seed position history with the starting FEN so threefold rep tracking is correct
-      positionHistoryRef.current = [
-        getPositionKey(sessionData.fen ?? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -'),
-      ];
-      setAdminTime(sessionData.adminTimeMs ?? 600000);
-      setStudentTime(sessionData.studentTimeMs ?? 600000);
-      setPlayer1Time(sessionData.player1TimeMs ?? 600000);
-      setPlayer2Time(sessionData.player2TimeMs ?? 600000);
       
-      // Initialize board snapshot buffer (used by admin for undo in all game modes)
-      const currentFen = sessionData.fen ?? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-      setBoardSnapshots([currentFen]);
-      setCanUndo(false);
-      
+      syncGameState(sessionData);
       setLoading(false);
     } catch (err) {
       console.error(err);
       toast.error('Failed to fetch session');
       navigate(role === 'admin' ? '/admin' : '/student');
     }
-  }, [user, role, navigate]);
+  }, [user, role, navigate, location.search, syncGameState]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -290,25 +230,6 @@ const Game: React.FC = () => {
           }
 
           setGame(newGameState);
-
-          // ── Client-side draw detection for remote (opponent) moves ────────────
-          // Only update history when this is NOT an echo of our own move
-          // (we already updated positionHistoryRef inside handleMove for our moves).
-          if (!isOurMove) {
-            const remPosKey = getPositionKey(newGameState.fen());
-            positionHistoryRef.current = [...positionHistoryRef.current, remPosKey];
-            const remDrawCheck = checkClientDraw(newGameState, positionHistoryRef.current);
-            if (remDrawCheck.isDraw) {
-              // A draw condition was detected on the remote move. Notify user
-              // but do NOT finalize the game locally — wait for server validation
-              // and authoritative `game-ended` broadcast.
-              try {
-                const reasonLabel = remDrawCheck.reason ? (remDrawCheck.reason === 'threefold' ? 'Threefold repetition' : remDrawCheck.reason.replace(/_/g, ' ')) : 'Draw';
-                toast.info(`${reasonLabel} detected; it's draw`);
-              } catch (err) {}
-            }
-          }
-          // ─────────────────────────────────────────────────────────────────────
         
         // Save board snapshot when a move occurred (admin uses this for undo in any mode)
         if (data.lastMove) {
@@ -366,8 +287,7 @@ const Game: React.FC = () => {
         } else {
           newSnapshots = [data.fen];
         }
-        // Trim position history to the same length so undone positions are not counted
-        positionHistoryRef.current = positionHistoryRef.current.slice(0, newSnapshots.length);
+        // Trim board snapshots to the same length so undone positions are not counted
         setCanUndo(newSnapshots.length > 1);
         return newSnapshots;
       });
@@ -414,31 +334,32 @@ const Game: React.FC = () => {
 
       // Determine didIWin using authoritative payload fields
       const winnerId = data.winnerId || null;
-      const player1Id = data.player1Id || data.player1Id;
-      const player2Id = data.player2Id || data.player2Id;
-      const adminId = data.adminId || data.adminId;
-      const studentId = data.studentId || data.studentId;
+      const { player1Id, player2Id, adminId, studentId, winner } = data;
 
       let didIWin = false;
       if (winnerId) {
         didIWin = winnerId === user?.id;
-      } else if (data.winner) {
+      } else if (winner) {
         // winner may be a role string
-        if (data.winner === 'admin' && adminId) didIWin = adminId === user?.id;
-        else if (data.winner === 'student' && studentId) didIWin = studentId === user?.id;
-        else if (data.winner === 'player1' && player1Id) didIWin = player1Id === user?.id;
-        else if (data.winner === 'player2' && player2Id) didIWin = player2Id === user?.id;
-        else didIWin = false;
+        if (winner === 'admin' && adminId) didIWin = adminId === user?.id;
+        else if (winner === 'student' && studentId) didIWin = studentId === user?.id;
+        else if (winner === 'player1' && player1Id) didIWin = player1Id === user?.id;
+        else if (winner === 'player2' && player2Id) didIWin = player2Id === user?.id;
       }
 
-      if (data.result === 'draw') {
+      const isDraw = data.result === 'draw';
+      
+      if (isDraw) {
+        const drawReasonMap: Record<string, string> = {
+          draw_threefold: 'Draw by threefold repetition',
+          draw_stalemate: 'Draw by stalemate',
+          draw_insufficient: 'Draw — insufficient material',
+          draw: 'Game drawn',
+        };
+        const drawLabel = drawReasonMap[winner as string] || drawReasonMap[data.drawReason as string] || 'Game drawn';
         setGameResult('draw');
-        setGameStatus('Game drawn');
-        setGameEndDetails({ reason: 'draw', status: 'Game drawn' });
-        setIsAnalyzing(false); // Reset analyze mode when new game ends
-        // Clear board snapshots when game ends
-        setBoardSnapshots([]);
-        setCanUndo(false);
+        setGameStatus(drawLabel);
+        setGameEndDetails({ reason: data.drawReason as string || 'draw', status: drawLabel });
       } else {
         setGameResult(didIWin ? 'win' : 'lose');
         let status = '';
@@ -455,11 +376,12 @@ const Game: React.FC = () => {
         }
         setGameStatus(status);
         setGameEndDetails({ reason, status });
-        setIsAnalyzing(false); // Reset analyze mode when new game ends
-        // Clear board snapshots when game ends
-        setBoardSnapshots([]);
-        setCanUndo(false);
       }
+
+      // Final cleanup for any game end
+      setIsAnalyzing(false);
+      setBoardSnapshots([]);
+      setCanUndo(false);
     };
 
     const onSessionReattached = (e: any) => {
@@ -471,20 +393,8 @@ const Game: React.FC = () => {
         return;
       }
       
-      console.log('Reattached to session:', data);
-      
       // Update session state with authoritative server state
-      setSession(data.session);
-      
-      // Update chess game state
-      const newGame = new Chess(data.session.fen);
-      setGame(newGame);
-      
-      // Update timers with server values
-      if (data.session.player1TimeMs !== undefined) setPlayer1Time(data.session.player1TimeMs);
-      if (data.session.player2TimeMs !== undefined) setPlayer2Time(data.session.player2TimeMs);
-      if (data.session.adminTimeMs !== undefined) setAdminTime(data.session.adminTimeMs);
-      if (data.session.studentTimeMs !== undefined) setStudentTime(data.session.studentTimeMs);
+      syncGameState(data.session);
       
       // Resume timer if game is still active
       if (data.session.status === 'active') {
@@ -534,14 +444,7 @@ const Game: React.FC = () => {
       });
       
       // Update session state with the new game
-      setSession(data.session);
-      setGame(new Chess(data.session.fen));
-      
-      // Update timers
-      if (data.session.player1TimeMs !== undefined) setPlayer1Time(data.session.player1TimeMs);
-      if (data.session.player2TimeMs !== undefined) setPlayer2Time(data.session.player2TimeMs);
-      if (data.session.adminTimeMs !== undefined) setAdminTime(data.session.adminTimeMs);
-      if (data.session.studentTimeMs !== undefined) setStudentTime(data.session.studentTimeMs);
+      syncGameState(data.session);
       
       // Navigate to the game page if not already there
       if (location.pathname !== '/game') {
@@ -672,21 +575,7 @@ const Game: React.FC = () => {
           if (!updated) return;
           // CRITICAL: Only update if this is the same session we're currently viewing
           if (updated._id && session && updated._id === session._id) {
-            setSession(updated);
-            setGame(new Chess(updated.fen));
-            // Only lower local timers from server values so we don't increase them unexpectedly
-            if (typeof updated.adminTimeMs === 'number') {
-              setAdminTime((prev) => Math.min(prev, updated.adminTimeMs));
-            }
-            if (typeof updated.studentTimeMs === 'number') {
-              setStudentTime((prev) => Math.min(prev, updated.studentTimeMs));
-            }
-            if (typeof updated.player1TimeMs === 'number') {
-              setPlayer1Time((prev) => Math.min(prev, updated.player1TimeMs));
-            }
-            if (typeof updated.player2TimeMs === 'number') {
-              setPlayer2Time((prev) => Math.min(prev, updated.player2TimeMs));
-            }
+            syncGameState(updated);
             
             if (updated.status === 'completed') {
               if (updated.winner === 'draw') {
@@ -720,7 +609,7 @@ const Game: React.FC = () => {
     }, 2000); // Poll every 2 seconds
 
     return () => clearInterval(interval);
-  }, [session?._id, isSpectator, user?.id]);
+  }, [session, isSpectator, user?.id, syncGameState]);
 
   // Chess clock logic
   useEffect(() => {
@@ -859,63 +748,39 @@ const Game: React.FC = () => {
     }
 
     try {
-      let drawReason: string | undefined = undefined;
       const newGame = new Chess(game.fen());
       const move = newGame.move({ from, to, promotion: promotion || 'q' });
 
       if (!move) return false;
 
-      // Do not apply move locally until server confirms it (timers switch after confirmation)
-
-      // Update session in database
+      // Determine game result from client perspective (checkmate only —
+      // draws are detected and declared exclusively by the backend)
       let status: 'active' | 'completed' = 'active';
-      let winner: 'admin' | 'student' | 'draw' | null = null;
-
-      
+      let winner: string | null = null;
 
       if (newGame.isCheckmate()) {
         status = 'completed';
-        // The player who just moved won. Use the move color (returned by chess.js)
-        const movedColor = move ? move.color : (currentTurn === 'w' ? 'b' : 'w');
+        // The player who just moved won.
+        const movedColor = move.color; // 'w' or 'b'
         if (isStudentVsStudent) {
           const p1IsWhite = session.player1IsWhite !== false;
-          // if movedColor is white and white is player1 => player1 won
-          const winRole = movedColor === 'w' ? (p1IsWhite ? 'player1' : 'player2') : (p1IsWhite ? 'player2' : 'player1');
-          winner = winRole as any;
+          winner = movedColor === 'w' ? (p1IsWhite ? 'player1' : 'player2') : (p1IsWhite ? 'player2' : 'player1');
         } else {
           const adminIsWhite = session.adminIsWhite !== false;
           winner = movedColor === 'w' ? (adminIsWhite ? 'admin' : 'student') : (adminIsWhite ? 'student' : 'admin');
         }
-        // Don't set final modal locally; wait for server to broadcast authoritative game-ended
         if (timerRef.current) clearInterval(timerRef.current);
-      } else {
-        // ── Client-side draw detection (runs entirely in the browser) ────────────
-        const posKey = getPositionKey(newGame.fen());
-        positionHistoryRef.current = [...positionHistoryRef.current, posKey];
-
-        const drawCheck = checkClientDraw(newGame, positionHistoryRef.current);
-        if (drawCheck.isDraw) {
-          status = 'completed';
-          winner = 'draw';
-          drawReason = drawCheck.reason;
-          // Do NOT finalize the game locally here. Notify user and submit
-          // the update to the server; wait for server validation/broadcast.
-          try {
-            const reasonLabel = drawCheck.reason ? (drawCheck.reason === 'threefold' ? 'Threefold repetition' : drawCheck.reason.replace(/_/g, ' ')) : 'Draw';
-            toast.info(`${reasonLabel} detected; it's a draw`);
-          } catch (err) {}
-        } else if (newGame.isCheck()) {
-          toast.warning('Check!');
-        }
-        // ─────────────────────────────────────────────────────────────────────
+      } else if (newGame.isCheck()) {
+        toast.warning('Check!');
       }
+      // Note: draw detection (stalemate, threefold, insufficient material) is
+      // handled server-side in processNextMove after the move is saved to DB.
 
       const API = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
       const bodyPayload: any = {
         fen: newGame.fen(),
         turn: newGame.turn(),
-        status,
-        winner,
+        ...(status === 'completed' ? { status, winner } : {}),
       };
       if (isStudentVsStudent) {
         bodyPayload.player1TimeMs = player1Time;
@@ -927,9 +792,7 @@ const Game: React.FC = () => {
 
       const res = await fetch(`${API}/sessions/${session._id}`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(bodyPayload),
       });
 
@@ -939,19 +802,14 @@ const Game: React.FC = () => {
         return false;
       }
 
-      // Apply confirmed move locally now (timers will switch because game.turn() changes)
+      // Apply confirmed move locally
       setGame(newGame);
-      
-      // Track this move to prevent duplicate application when server confirms
-      if (move) {
-        const moveId = `${move.from}${move.to}${newGame.fen()}`;
-        lastAppliedMoveRef.current = moveId;
-      }
 
-      // Emit real-time update via SocketProvider
-      // Include the last move so remote clients can highlight it even when
-      // we recreate the board from a FEN (which loses move history).
-      console.log('[GAME] About to send move via socket:', { sessionId: session._id, socket: !!socket });
+      // Track this move to prevent duplicate application on server echo
+      const moveId = `${move.from}${move.to}${newGame.fen()}`;
+      lastAppliedMoveRef.current = moveId;
+
+      // Emit real-time update via socket so the opponent sees the move immediately
       if (!socket || !socket.sendMove) {
         console.error('[GAME] Socket or sendMove not available!');
         toast.error('Real-time sync unavailable');
@@ -974,15 +832,10 @@ const Game: React.FC = () => {
         }
       }
 
-      // If the game finished (checkmate/draw), notify server to broadcast game-ended
-      if (status === 'completed') {
+      // Only signal checkmate to the server — draws are signalled by the server itself
+      if (status === 'completed' && newGame.isCheckmate()) {
         try {
-          // Use the computed `winner` to determine draw vs win. Avoid relying on
-          // chess.isDraw() here because we have disabled the 50-move rule.
-          const resultType = winner === 'draw' ? 'draw' : (newGame.isCheckmate() ? 'checkmate' : 'ended');
-          const endedPayload: any = { sessionId: session._id, result: resultType, winner, fen: newGame.fen() };
-          if (winner === 'draw' && drawReason) endedPayload.drawReason = drawReason;
-          socket.sendGameEnded(endedPayload);
+          socket.sendGameEnded({ sessionId: session._id, result: 'checkmate', winner, fen: newGame.fen() });
         } catch (err) {
           console.error('Failed to send game-ended event', err);
         }
@@ -1019,9 +872,6 @@ const Game: React.FC = () => {
       setGame(new Chess(previousFen));
       setBoardSnapshots(newSnapshots);
       setCanUndo(newSnapshots.length > 1);
-
-      // Trim position history to match the new snapshot length
-      positionHistoryRef.current = positionHistoryRef.current.slice(0, newSnapshots.length);
 
       // Mark locally so the server echo is ignored (prevent double-apply)
       lastUndoRef.current = previousFen;
